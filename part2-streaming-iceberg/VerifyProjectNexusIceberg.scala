@@ -2,16 +2,33 @@ package com.demo
 
 import org.apache.spark.sql.SparkSession
 
+import java.nio.file.{Files, Paths}
+
 object VerifyProjectNexusIceberg {
   def main(args: Array[String]): Unit = {
-    System.setProperty("hadoop.home.dir", "C:/hadoop")
-    System.load("C:/hadoop/bin/hadoop.dll")
+    val isWindows = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).contains("win")
+    val windowsHadoopDll = Paths.get(
+      sys.env.getOrElse("HADOOP_HOME", "C:/hadoop"),
+      "bin",
+      "hadoop.dll"
+    )
+    if (isWindows && Files.exists(windowsHadoopDll)) {
+      System.setProperty("hadoop.home.dir", windowsHadoopDll.getParent.getParent.toString)
+      System.load(windowsHadoopDll.toAbsolutePath.toString)
+    }
 
-    val warehousePath = "file:///C:/kafkastreamingicebergdemo/spark-warehouse"
+    val defaultWarehouse = if (isWindows) {
+      "file:///C:/kafkastreamingicebergdemo/spark-warehouse"
+    } else {
+      "file:///lakehouse/warehouse"
+    }
+    val warehousePath = sys.env.getOrElse("ICEBERG_WAREHOUSE", defaultWarehouse)
+    val sparkMaster = sys.env.getOrElse("SPARK_MASTER", "local[*]")
 
     val spark = SparkSession.builder()
       .appName("VerifyProjectNexusIceberg")
-      .master("local[*]")
+      .master(sparkMaster)
+      .config("spark.sql.catalogImplementation", "in-memory")
       .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
       .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog")
       .config("spark.sql.catalog.local.type", "hadoop")

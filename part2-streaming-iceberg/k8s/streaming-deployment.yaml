@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-streaming
+  namespace: streaming
+  labels:
+    app: nexus-streaming
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nexus-streaming
+  template:
+    metadata:
+      labels:
+        app: nexus-streaming
+    spec:
+      securityContext:
+        fsGroup: 185
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: streaming
+          image: nexus-streaming:1.0
+          imagePullPolicy: Never
+          args:
+            - --master
+            - local[*]
+            - --conf
+            - spark.jars.ivy=/lakehouse/ivy2
+            - --packages
+            - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.9,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.12.0
+            - --class
+            - com.demo.ProjectNexusStreamingApp
+            - /opt/project-nexus/app.jar
+          envFrom:
+            - configMapRef:
+                name: nexus-streaming-config
+          env:
+            - name: HOME
+              value: /tmp
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /tmp/nexus-streaming-ready
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 36
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test -f /tmp/nexus-streaming-ready
+            periodSeconds: 10
+            timeoutSeconds: 2
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - kill -0 1
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: streaming-state
+              mountPath: /lakehouse
+            - name: reference-data
+              mountPath: /data/reference
+              readOnly: true
+      volumes:
+        - name: streaming-state
+          persistentVolumeClaim:
+            claimName: nexus-stream-state
+        - name: reference-data
+          configMap:
+            name: nexus-reference-data

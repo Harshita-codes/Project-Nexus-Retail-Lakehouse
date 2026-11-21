@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexus-streaming-config
+  namespace: streaming
+data:
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_TOPIC: order-events
+  REFERENCE_DATA_DIR: file:///data/reference
+  ICEBERG_WAREHOUSE: file:///lakehouse/warehouse
+  STREAM_CHECKPOINT_DIR: file:///lakehouse/checkpoints/project_nexus
+  SPARK_MASTER: local[*]
+  SPARK_SHUFFLE_PARTITIONS: "4"
+  READY_FILE: /tmp/nexus-streaming-ready

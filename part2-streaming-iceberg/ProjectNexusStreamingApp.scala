@@ -6,23 +6,55 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.streaming.Trigger
 import org.apache.spark.sql.types._
 
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Paths}
+
 object ProjectNexusStreamingApp {
   def main(args: Array[String]): Unit = {
-    System.setProperty("hadoop.home.dir", "C:/hadoop")
-    System.load("C:/hadoop/bin/hadoop.dll")
+    val isWindows = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).contains("win")
+    val windowsHadoopDll = Paths.get(
+      sys.env.getOrElse("HADOOP_HOME", "C:/hadoop"),
+      "bin",
+      "hadoop.dll"
+    )
+    if (isWindows && Files.exists(windowsHadoopDll)) {
+      System.setProperty("hadoop.home.dir", windowsHadoopDll.getParent.getParent.toString)
+      System.load(windowsHadoopDll.toAbsolutePath.toString)
+    }
 
-    val warehousePath = "file:///C:/kafkastreamingicebergdemo/spark-warehouse"
-    val checkpointDir = "file:///C:/kafkastreamingicebergdemo/checkpoints/project_nexus"
-    val dataDir       = "file:///C:/kafkastreamingicebergdemo/nexus-data"
+    val defaultWarehouse = if (isWindows) {
+      "file:///C:/kafkastreamingicebergdemo/spark-warehouse"
+    } else {
+      "file:///lakehouse/warehouse"
+    }
+    val defaultCheckpoint = if (isWindows) {
+      "file:///C:/kafkastreamingicebergdemo/checkpoints/project_nexus"
+    } else {
+      "file:///lakehouse/checkpoints/project_nexus"
+    }
+    val defaultDataDir = if (isWindows) {
+      "file:///C:/kafkastreamingicebergdemo/nexus-data"
+    } else {
+      "file:///data/reference"
+    }
+
+    val warehousePath = sys.env.getOrElse("ICEBERG_WAREHOUSE", defaultWarehouse)
+    val checkpointDir = sys.env.getOrElse("STREAM_CHECKPOINT_DIR", defaultCheckpoint)
+    val dataDir = sys.env.getOrElse("REFERENCE_DATA_DIR", defaultDataDir)
+    val sparkMaster = sys.env.getOrElse("SPARK_MASTER", "local[*]")
+    val kafkaBootstrapServers = sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    val kafkaTopic = sys.env.getOrElse("KAFKA_TOPIC", "order-events")
+    val shufflePartitions = sys.env.getOrElse("SPARK_SHUFFLE_PARTITIONS", "4")
+    val readyFile = Paths.get(sys.env.getOrElse("READY_FILE", "/tmp/nexus-streaming-ready"))
 
     val spark = SparkSession.builder()
       .appName("ProjectNexusStreamingApp")
-      .master("local[*]")
+      .master(sparkMaster)
       .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
       .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog")
       .config("spark.sql.catalog.local.type", "hadoop")
       .config("spark.sql.catalog.local.warehouse", warehousePath)
-      .config("spark.sql.shuffle.partitions", "4")
+      .config("spark.sql.shuffle.partitions", shufflePartitions)
       .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")
@@ -146,8 +178,8 @@ object ProjectNexusStreamingApp {
 
     val kafkaStream = spark.readStream
       .format("kafka")
-      .option("kafka.bootstrap.servers", "localhost:9092")
-      .option("subscribe", "order-events")
+      .option("kafka.bootstrap.servers", kafkaBootstrapServers)
+      .option("subscribe", kafkaTopic)
       .option("startingOffsets", "earliest")
       .option("maxOffsetsPerTrigger", "13")
       .load()
@@ -381,8 +413,9 @@ object ProjectNexusStreamingApp {
       }
       .start()
 
-    println("=== ProjectNexusStreamingApp is listening on Kafka topic 'order-events' ===")
-    println("=== Processing all 5 micro-batches (0..4) automatically! ===")
+    Files.write(readyFile, "ready\n".getBytes(StandardCharsets.UTF_8))
+    println(s"=== ProjectNexusStreamingApp is listening on Kafka topic '$kafkaTopic' ===")
+    println("=== Streaming query is active and waiting for Kafka micro-batches ===")
     query.awaitTermination()
   }
 }

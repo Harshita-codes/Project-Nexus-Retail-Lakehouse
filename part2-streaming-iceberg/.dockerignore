@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!target/
+!target/out/
+!target/out/jvm/
+!target/out/jvm/scala-2.12.18/
+!target/out/jvm/scala-2.12.18/kafkastreamingicebergdemo/
+!target/out/jvm/scala-2.12.18/kafkastreamingicebergdemo/*.jar

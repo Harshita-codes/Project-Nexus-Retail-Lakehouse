@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nexus-order-event-producer
+  namespace: streaming
+  labels:
+    app: nexus-order-event-producer
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 180
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: nexus-order-event-producer
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: producer
+          image: nexus-kafka-producer:1.0
+          imagePullPolicy: Never
+          args:
+            - --once
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: kafka:9092
+            - name: KAFKA_TOPIC
+              value: order-events
+            - name: EVENT_FILE_PATH
+              value: /app/data/events
+            - name: PRODUCER_INTERVAL_MS
+              value: "25"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
