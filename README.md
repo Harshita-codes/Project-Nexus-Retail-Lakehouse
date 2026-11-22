@@ -1,6 +1,6 @@
 # Project Nexus — Retail Medallion Lakehouse (Batch & Real-Time Streaming)
 
-End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeline built in **Scala**, combining batch Lakehouse governance on **Azure Databricks (Delta Lake)** with low-latency event streaming on **Apache Kafka, Spark Structured Streaming, and Apache Iceberg**.
+End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeline built in **Scala**, combining batch Lakehouse governance on **Azure Databricks (Delta Lake)** with low-latency event streaming on **Apache Kafka, Spark Structured Streaming, Delta Lake, and Apache Iceberg**.
 
 
 ## Architecture Overview
@@ -17,11 +17,11 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 * **Gold Analytics:** Builds `gold_category_sales` and `gold_customer_spend` (excluding `CANCELLED` orders).
 * **Governance:** Verified via `DESCRIBE HISTORY`, Delta Time Travel (`VERSION AS OF 0` = 88 rows vs. current = 104 rows), `OPTIMIZE ... ZORDER BY`, and `VACUUM`.
 
-### Part II: Real-Time Streaming (Kafka, Spark Structured Streaming & Apache Iceberg)
-* **Ingestion:** The checked-in producer sample publishes 30 JSON events to Kafka topic `order-events`, which are ingested into `local.retail_nexus.bronze_order_events`.
-* **Stream Validation & Quarantine:** Filters invalid and duplicate events, non-positive quantities/prices, invalid event types, and orphan foreign keys into `local.retail_nexus.quarantine_order_events` (16 events in the verified local run).
-* **Stateful Upserts, Late Arrivals & Schema Evolution:** Maintains `local.retail_nexus.silver_order_events` (12 orders in the verified local run), handling updates, cancellations, late arrivals, and the `sales_channel` and `discount_amount` fields.
-* **Gold Streaming Window & Snapshots:** Computes 10-minute event-time category revenue in `local.retail_nexus.gold_streaming_sales_window` (8 rows in the verified local run) and records Iceberg snapshots.
+### Part II: Real-Time Streaming (Kafka, Spark Structured Streaming, Delta Lake & Iceberg)
+* **Ingestion:** The checked-in producer sample publishes 30 JSON events to Kafka topic `order-events`; the app writes them to Iceberg and is configured to mirror them into Delta.
+* **Stream Validation & Quarantine:** Filters invalid and duplicate events, non-positive quantities/prices, invalid event types, and orphan foreign keys (16 events in the verified Iceberg run); the updated app also writes quarantine records to Delta.
+* **Stateful Upserts, Late Arrivals & Schema Evolution:** Maintains Iceberg silver (12 orders in the verified local run), handling updates, cancellations, late arrivals, and the `sales_channel` and `discount_amount` fields; the updated app mirrors this state to Delta.
+* **Gold Streaming Window & Snapshots:** Computes 10-minute event-time category revenue (8 rows in the verified Iceberg run), records Iceberg snapshots, and is configured to mirror the aggregate to Delta.
 
 ---
 
@@ -29,27 +29,32 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 
 ```text
 ├── part1-batch-databricks/
-│   └── 01_bronze_ingestion.scala
+│   ├── 01_bronze_ingestion.scala
+│   └── screenshots/
 ├── part2-streaming-iceberg/
 │   ├── build.sbt
 │   ├── ProjectNexusStreamingApp.scala
-│   └── VerifyProjectNexusIceberg.scala
+│   ├── VerifyProjectNexusIceberg.scala
+│   ├── src/test/
+│   └── screenshots/
 ├── producer/
 │   ├── build.sbt
 │   ├── src/
 │   └── data/events/
 ├── .github/workflows/ci.yml
 ├── docs/
-│   └── delta-vs-iceberg.md
-├── screenshots/
-│   ├── part1-databricks/
-│   └── part2-iceberg/
+│   ├── requirements-and-assumptions.md
+│   ├── solution-design.md
+│   ├── delta-vs-iceberg.md
+│   ├── runbook.md
+│   ├── known-issues.md
+│   └── final-presentation-outline.md
 └── README.md
 ```
 
 ## Automated Tests and CI
 
-The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. The streaming tests run Spark locally to check duplicate and invalid-event quarantine rules plus ten-minute revenue aggregation. GitHub Actions runs both test suites, assembles the producer, and compiles and packages the Spark streaming application on pushes and pull requests to `main`.
+The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. The streaming tests run Spark locally to check validation/quarantine rules, ten-minute revenue aggregation, Delta retry idempotency and schema evolution/time travel, and Iceberg replay idempotency and bootstrap. GitHub Actions runs both test suites, packages both Scala projects, and builds both Docker images on pushes and pull requests to `main`.
 
 Run the producer tests locally:
 
@@ -171,9 +176,11 @@ kafka-console-consumer \
 
 ### Run Spark streaming on local Kubernetes
 
-The local Kubernetes deployment runs Spark 3.5.9 in a single pod using local mode. It connects to the Kafka Service `kafka:9092`, mounts the reference CSV files from `nexus-reference-data`, and stores Iceberg tables and streaming checkpoints on the `nexus-stream-state` PVC.
+The local Kubernetes deployment runs Spark 3.5.9 in a single pod using local mode. It connects to the Kafka Service `kafka:9092`, mounts the reference CSV files from `nexus-reference-data`, and stores Delta tables, Iceberg tables, and streaming checkpoints on the `nexus-stream-state` PVC.
 
 The local example uses the Docker Desktop `hostpath` storage class. This is suitable for a local demonstration, not a cloud durability guarantee. Do not delete the PVC before saving the table and checkpoint evidence. The local Kafka broker has PLAINTEXT authentication disabled, so this demo has no Kafka credentials to store in a Secret.
+
+The streaming app writes Bronze, Silver, Quarantine, and Gold outputs to both Iceberg and Delta. Delta paths default to `/lakehouse/delta/retail_nexus` and can be changed with `DELTA_WAREHOUSE`. If those Delta paths do not exist on startup, the app seeds them from the current Iceberg tables, so an existing Kafka checkpoint can be kept and the producer does not need to be rerun. Delta Bronze and Quarantine appends use batch transaction IDs for retry idempotency; Delta Silver and Gold are refreshed from the current Iceberg state. Those full-state refreshes are intended for this small demo, not high-volume production.
 
 First, make sure the reference-data ConfigMap exists. The following PowerShell command creates or updates it from the local sample files:
 
@@ -198,7 +205,14 @@ kubectl apply -f .\k8s\streaming-deployment.yaml
 kubectl rollout status deployment/nexus-streaming -n streaming --timeout=8m
 ```
 
-The image uses Java 17 and the Spark 3.5.9 distribution. The pod resolves the Spark Kafka connector and Iceberg runtime through Maven Central at startup; it therefore needs internet access on first launch. Spark's Ivy cache is stored at `/lakehouse/ivy2` on the persistent volume, so dependencies remain available after pod restarts. Kubernetes probes check that the Spark process is alive and that its streaming query has started. Resource requests and limits are defined in the Deployment manifest.
+For an existing Deployment, if you rebuilt the same `nexus-streaming:1.0` image tag, applying the manifest does not trigger a rollout. Restart it to use the rebuilt local image and updated ConfigMap values:
+
+```powershell
+kubectl rollout restart deployment/nexus-streaming -n streaming
+kubectl rollout status deployment/nexus-streaming -n streaming --timeout=8m
+```
+
+The image uses Java 17 and the Spark 3.5.9 distribution. The pod resolves the Spark Kafka connector, Iceberg runtime, and Delta Lake 3.3.2 runtime through Maven Central at startup; it therefore needs internet access on first launch. Spark's Ivy cache is stored at `/lakehouse/ivy2` on the persistent volume, so dependencies remain available after pod restarts. If the Delta paths do not exist yet, the app initializes them from the current Iceberg tables before consuming further Kafka events. Kubernetes probes check that the Spark process is alive and that its streaming query has started. Resource requests and limits are defined in the Deployment manifest.
 
 Check the pod and follow the processing logs:
 
@@ -208,7 +222,7 @@ kubectl logs -n streaming deployment/nexus-streaming --tail=100
 kubectl logs -n streaming deployment/nexus-streaming -f
 ```
 
-For the checked-in 30-event producer sample, the expected Iceberg counts after processing are 30 bronze events, 12 silver orders, 16 quarantined events, and 8 gold windows. Query them from the running pod:
+For the checked-in 30-event producer sample, the expected counts in both formats after processing are 30 bronze events, 12 silver orders, 16 quarantined events, and 8 gold windows. Query the Iceberg tables from the running pod:
 
 ```powershell
 kubectl exec -n streaming deployment/nexus-streaming -- /opt/spark/bin/spark-sql --master 'local[1]' --driver-memory 512m --conf spark.jars.ivy=/lakehouse/ivy2 --conf spark.sql.catalogImplementation=in-memory --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.catalog.local=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.local.type=hadoop --conf spark.sql.catalog.local.warehouse=file:///lakehouse/warehouse --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.12.0 -e "SELECT 'bronze' AS dataset, count(*) AS rows FROM local.retail_nexus.bronze_order_events UNION ALL SELECT 'silver', count(*) FROM local.retail_nexus.silver_order_events UNION ALL SELECT 'quarantine', count(*) FROM local.retail_nexus.quarantine_order_events UNION ALL SELECT 'gold_windows', count(*) FROM local.retail_nexus.gold_streaming_sales_window UNION ALL SELECT 'silver_snapshots', count(*) FROM local.retail_nexus.silver_order_events.snapshots"
@@ -217,7 +231,7 @@ kubectl exec -n streaming deployment/nexus-streaming -- /opt/spark/bin/spark-sql
 Run the Iceberg verifier to capture the evolved schema, row samples, snapshot history, and row count at the earliest silver snapshot:
 
 ```powershell
-kubectl exec -n streaming deployment/nexus-streaming -- env ICEBERG_WAREHOUSE=file:///lakehouse/warehouse SPARK_MASTER=local[1] /opt/spark/bin/spark-submit --master "local[1]" --driver-memory 512m --conf spark.jars.ivy=/lakehouse/ivy2 --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.12.0 --class com.demo.VerifyProjectNexusIceberg /opt/project-nexus/app.jar
+kubectl exec -n streaming deployment/nexus-streaming -- env ICEBERG_WAREHOUSE=file:///lakehouse/warehouse DELTA_WAREHOUSE=file:///lakehouse/delta/retail_nexus SPARK_MASTER=local[1] /opt/spark/bin/spark-submit --master "local[1]" --driver-memory 512m --conf spark.jars.ivy=/lakehouse/ivy2 --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,io.delta.sql.DeltaSparkSessionExtension --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.12.0,io.delta:delta-spark_2.12:3.3.2 --class com.demo.VerifyProjectNexusIceberg /opt/project-nexus/app.jar
 ```
 
 Capture the output of the count query, the Deployment/pod status, and the processing logs as evidence. The first run reads the existing `order-events` topic from the earliest offsets; do not rerun the producer unless you intend to add another test batch.
@@ -231,7 +245,7 @@ kubectl get pods,pvc -n streaming
 kubectl logs -n streaming deployment/nexus-streaming --tail=100
 ```
 
-The PVC must remain bound: it contains the Spark checkpoint and Iceberg warehouse. After recovery, rerun the count query and compare the results with the captured pre-restart counts.
+The PVC must remain bound: it contains the Spark checkpoint and both table-format warehouses. After recovery, rerun the count query and compare the results with the captured pre-restart counts.
 
 To demonstrate a temporary runtime configuration change, rollout, and rollback, override the shuffle partition count in the Deployment, verify it in the new pod, then roll back to the manifest-backed ConfigMap value:
 
@@ -248,3 +262,7 @@ kubectl exec -n streaming deployment/nexus-streaming -- printenv SPARK_SHUFFLE_P
 ```
 
 The first printed value should be `2`; after rollback it should be `4`, inherited from `nexus-streaming-config`. Capture both values and the rollout history/status as evidence. The local broker uses no authentication, so no credentials are needed in this deployment. If authentication is added later, store credentials in a Kubernetes Secret and reference it through the pod environment or a mounted file; never commit secret values to Git.
+
+## Known Issues and Future Enhancements
+
+See [docs/known-issues.md](docs/known-issues.md) for environment limitations, storage consistency notes, and recommended enhancements. The remaining evidence checklist is in [docs/requirements-and-assumptions.md](docs/requirements-and-assumptions.md), and the [final presentation outline](docs/final-presentation-outline.md) lists the demonstration order.

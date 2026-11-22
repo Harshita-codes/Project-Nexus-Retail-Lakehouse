@@ -23,13 +23,22 @@ object VerifyProjectNexusIceberg {
       "file:///lakehouse/warehouse"
     }
     val warehousePath = sys.env.getOrElse("ICEBERG_WAREHOUSE", defaultWarehouse)
+    val deltaWarehousePath = sys.env.getOrElse(
+      "DELTA_WAREHOUSE",
+      if (isWindows) "file:///C:/kafkastreamingicebergdemo/delta-warehouse/retail_nexus"
+      else "file:///lakehouse/delta/retail_nexus"
+    )
     val sparkMaster = sys.env.getOrElse("SPARK_MASTER", "local[*]")
 
     val spark = SparkSession.builder()
       .appName("VerifyProjectNexusIceberg")
       .master(sparkMaster)
       .config("spark.sql.catalogImplementation", "in-memory")
-      .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+      .config(
+        "spark.sql.extensions",
+        "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,io.delta.sql.DeltaSparkSessionExtension"
+      )
+      .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
       .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog")
       .config("spark.sql.catalog.local.type", "hadoop")
       .config("spark.sql.catalog.local.warehouse", warehousePath)
@@ -88,5 +97,12 @@ object VerifyProjectNexusIceberg {
       s"SELECT count(*) FROM local.retail_nexus.silver_order_events VERSION AS OF $earliestSnapshotId"
     ).first().getLong(0)
     println(s"Iceberg time travel -> earliest snapshot $earliestSnapshotId has $earliestSnapshotRows silver rows")
+
+    println("\n=== 7. DELTA COPIES OF STREAMING TABLES ===")
+    Seq("bronze_order_events", "silver_order_events", "quarantine_order_events", "gold_streaming_sales_window")
+      .foreach { tableName =>
+        val deltaRows = spark.read.format("delta").load(s"$deltaWarehousePath/$tableName").count()
+        println(s"$tableName Delta rows: $deltaRows")
+      }
   }
 }

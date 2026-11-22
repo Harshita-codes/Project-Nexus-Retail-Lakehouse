@@ -39,6 +39,10 @@ jobs:
         working-directory: producer
         run: sbt assembly
 
+      - name: Build producer image
+        working-directory: producer
+        run: docker build -t nexus-kafka-producer:ci .
+
       - name: Compile streaming application
         working-directory: part2-streaming-iceberg
         run: sbt compile
@@ -46,3 +50,7 @@ jobs:
       - name: Package streaming application
         working-directory: part2-streaming-iceberg
         run: sbt package
+
+      - name: Build streaming image
+        working-directory: part2-streaming-iceberg
+        run: docker build -t nexus-streaming:ci .

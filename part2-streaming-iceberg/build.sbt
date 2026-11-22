@@ -10,6 +10,8 @@ lazy val root = (project in file("."))
       "org.apache.spark" %% "spark-sql-kafka-0-10" % "3.5.9",
       // Apache Iceberg runtime
       "org.apache.iceberg" % "iceberg-spark-runtime-3.5_2.12" % "1.12.0",
+      // Delta Lake runtime for durable copies of streaming tables
+      "io.delta" %% "delta-spark" % "3.3.2",
       "org.scalatest" %% "scalatest" % "3.2.19" % Test
     ),
     Compile / run / fork := true,

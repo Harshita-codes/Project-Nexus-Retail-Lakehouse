@@ -1,5 +1,6 @@
 package com.demo
 
+import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
@@ -39,6 +40,11 @@ object ProjectNexusStreamingApp {
     }
 
     val warehousePath = sys.env.getOrElse("ICEBERG_WAREHOUSE", defaultWarehouse)
+    val deltaWarehousePath = sys.env.getOrElse(
+      "DELTA_WAREHOUSE",
+      if (isWindows) "file:///C:/kafkastreamingicebergdemo/delta-warehouse/retail_nexus"
+      else "file:///lakehouse/delta/retail_nexus"
+    )
     val checkpointDir = sys.env.getOrElse("STREAM_CHECKPOINT_DIR", defaultCheckpoint)
     val dataDir = sys.env.getOrElse("REFERENCE_DATA_DIR", defaultDataDir)
     val sparkMaster = sys.env.getOrElse("SPARK_MASTER", "local[*]")
@@ -50,7 +56,12 @@ object ProjectNexusStreamingApp {
     val spark = SparkSession.builder()
       .appName("ProjectNexusStreamingApp")
       .master(sparkMaster)
-      .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+      .config(
+        "spark.sql.extensions",
+        "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,io.delta.sql.DeltaSparkSessionExtension"
+      )
+      .config("spark.sql.catalogImplementation", "in-memory")
+      .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
       .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog")
       .config("spark.sql.catalog.local.type", "hadoop")
       .config("spark.sql.catalog.local.warehouse", warehousePath)
@@ -148,9 +159,19 @@ object ProjectNexusStreamingApp {
         rejection_reason STRING,
         raw_payload STRING,
         batch_id BIGINT,
-        _quarantined_at TIMESTAMP
+        _quarantined_at TIMESTAMP,
+        kafka_partition INT,
+        kafka_offset BIGINT
       ) USING iceberg
     """)
+
+    val quarantineColumns = spark.table("local.retail_nexus.quarantine_order_events").columns.toSet
+    if (!quarantineColumns.contains("kafka_partition")) {
+      spark.sql("ALTER TABLE local.retail_nexus.quarantine_order_events ADD COLUMNS (kafka_partition INT)")
+    }
+    if (!spark.table("local.retail_nexus.quarantine_order_events").columns.contains("kafka_offset")) {
+      spark.sql("ALTER TABLE local.retail_nexus.quarantine_order_events ADD COLUMNS (kafka_offset BIGINT)")
+    }
 
     spark.sql("""
       CREATE TABLE IF NOT EXISTS local.retail_nexus.gold_streaming_sales_window (
@@ -162,6 +183,8 @@ object ProjectNexusStreamingApp {
         net_revenue DECIMAL(14, 2)
       ) USING iceberg
     """)
+
+    initializeDeltaCopies(spark, deltaWarehousePath)
 
     val eventJsonSchema = new StructType()
       .add("event_id", StringType, nullable = true)
@@ -201,13 +224,16 @@ object ProjectNexusStreamingApp {
             lit(batchId).alias("batch_id"),
             current_timestamp().alias("_ingested_at")
           )
-          bronzeDF.writeTo("local.retail_nexus.bronze_order_events").append()
+          mergeBronzeEvents(batchSpark, bronzeDF)
+          appendDeltaBatch(bronzeDF, s"$deltaWarehousePath/bronze_order_events", "bronze", batchId)
 
           val parsedDF = bronzeDF
             .withColumn("data", from_json(col("raw_payload"), eventJsonSchema))
             .select(
               col("raw_payload"),
               col("batch_id"),
+              col("kafka_partition"),
+              col("kafka_offset"),
               col("data.event_id").alias("event_id"),
               col("data.order_id").alias("order_id"),
               col("data.customer_id").alias("customer_id"),
@@ -243,12 +269,14 @@ object ProjectNexusStreamingApp {
               col("ingest_time_str").alias("ingest_time"),
               col("sales_channel"), col("discount_amount"),
               col("rejection_reason"), col("raw_payload"), col("batch_id"),
+              col("kafka_partition"), col("kafka_offset"),
               current_timestamp().alias("_quarantined_at")
             )
 
           val qCount = quarantineDF.count()
           if (qCount > 0) {
-            quarantineDF.writeTo("local.retail_nexus.quarantine_order_events").append()
+            mergeQuarantineEvents(batchSpark, quarantineDF)
+            appendDeltaBatch(quarantineDF, s"$deltaWarehousePath/quarantine_order_events", "quarantine", batchId)
             println(s"[Quarantine] Rejected $qCount invalid/duplicate events:")
             quarantineDF.select("event_id", "order_id", "event_type", "rejection_reason").show(truncate = false)
           }
@@ -363,9 +391,11 @@ object ProjectNexusStreamingApp {
             }
 
             val currentSilver = batchSpark.table("local.retail_nexus.silver_order_events")
+            overwriteDeltaSnapshot(currentSilver, s"$deltaWarehousePath/silver_order_events")
             val goldWindowDF = aggregateGoldWindow(currentSilver, validProductsDF)
 
             goldWindowDF.writeTo("local.retail_nexus.gold_streaming_sales_window").overwritePartitions()
+            overwriteDeltaSnapshot(goldWindowDF, s"$deltaWarehousePath/gold_streaming_sales_window")
             println(s"[Silver & Gold] Merged $vCount valid events. Total Silver Orders now: ${currentSilver.count()}")
           }
         }
@@ -440,5 +470,84 @@ object ProjectNexusStreamingApp {
         col("total_units"),
         col("net_revenue")
       )
+  }
+
+  private[demo] def appendDeltaBatch(
+      batchDF: DataFrame,
+      path: String,
+      tableName: String,
+      batchId: Long
+  ): Unit =
+    batchDF.write
+      .format("delta")
+      .mode("append")
+      .option("txnAppId", s"project-nexus-$tableName")
+      .option("txnVersion", batchId)
+      .save(path)
+
+  private[demo] def overwriteDeltaSnapshot(snapshotDF: DataFrame, path: String): Unit =
+    snapshotDF.write
+      .format("delta")
+      .mode("overwrite")
+      .option("overwriteSchema", "true")
+      .save(path)
+
+  private[demo] def initializeDeltaCopies(spark: SparkSession, warehousePath: String): Unit = {
+    val tables = Seq(
+      "bronze_order_events",
+      "silver_order_events",
+      "quarantine_order_events",
+      "gold_streaming_sales_window"
+    )
+    tables.foreach { tableName =>
+      val deltaPath = s"$warehousePath/$tableName"
+      if (!DeltaTable.isDeltaTable(spark, deltaPath)) {
+        val icebergSnapshot = spark.table(s"local.retail_nexus.$tableName")
+        overwriteDeltaSnapshot(icebergSnapshot, deltaPath)
+      }
+    }
+  }
+
+  private[demo] def mergeBronzeEvents(
+      spark: SparkSession,
+      batchDF: DataFrame,
+      targetTable: String = "local.retail_nexus.bronze_order_events"
+  ): Unit = {
+    batchDF.createOrReplaceTempView("incoming_bronze_order_events")
+    spark.sql(s"""
+      MERGE INTO $targetTable AS target
+      USING incoming_bronze_order_events AS source
+      ON target.kafka_partition = source.kafka_partition
+        AND target.kafka_offset = source.kafka_offset
+      WHEN NOT MATCHED THEN INSERT *
+    """)
+  }
+
+  private[demo] def mergeQuarantineEvents(
+      spark: SparkSession,
+      batchDF: DataFrame,
+      targetTable: String = "local.retail_nexus.quarantine_order_events"
+  ): Unit = {
+    batchDF.createOrReplaceTempView("incoming_quarantine_order_events")
+    spark.sql(s"""
+      MERGE INTO $targetTable AS target
+      USING incoming_quarantine_order_events AS source
+      ON target.kafka_partition = source.kafka_partition
+        AND target.kafka_offset = source.kafka_offset
+      WHEN NOT MATCHED THEN
+        INSERT (
+          event_id, order_id, customer_id, product_id, quantity, unit_price,
+          event_type, event_time, ingest_time, sales_channel, discount_amount,
+          rejection_reason, raw_payload, batch_id, _quarantined_at,
+          kafka_partition, kafka_offset
+        )
+        VALUES (
+          source.event_id, source.order_id, source.customer_id, source.product_id,
+          source.quantity, source.unit_price, source.event_type, source.event_time,
+          source.ingest_time, source.sales_channel, source.discount_amount,
+          source.rejection_reason, source.raw_payload, source.batch_id,
+          source._quarantined_at, source.kafka_partition, source.kafka_offset
+        )
+    """)
   }
 }

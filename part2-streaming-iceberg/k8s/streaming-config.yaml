@@ -8,6 +8,7 @@ data:
   KAFKA_TOPIC: order-events
   REFERENCE_DATA_DIR: file:///data/reference
   ICEBERG_WAREHOUSE: file:///lakehouse/warehouse
+  DELTA_WAREHOUSE: file:///lakehouse/delta/retail_nexus
   STREAM_CHECKPOINT_DIR: file:///lakehouse/checkpoints/project_nexus
   SPARK_MASTER: local[*]
   SPARK_SHUFFLE_PARTITIONS: "4"
