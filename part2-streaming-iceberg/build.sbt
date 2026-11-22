@@ -9,10 +9,20 @@ lazy val root = (project in file("."))
       // Kafka connector for Spark Structured Streaming
       "org.apache.spark" %% "spark-sql-kafka-0-10" % "3.5.9",
       // Apache Iceberg runtime
-      "org.apache.iceberg" % "iceberg-spark-runtime-3.5_2.12" % "1.12.0"
+      "org.apache.iceberg" % "iceberg-spark-runtime-3.5_2.12" % "1.12.0",
+      "org.scalatest" %% "scalatest" % "3.2.19" % Test
     ),
     Compile / run / fork := true,
     Compile / run / javaOptions ++= Seq(
+      "--add-exports=java.base/sun.nio.ch=ALL-UNNAMED",
+      "--add-opens=java.base/java.nio=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+      "--add-opens=java.base/java.util=ALL-UNNAMED"
+    ),
+    Test / fork := true,
+    Test / parallelExecution := false,
+    Test / javaOptions ++= Seq(
       "--add-exports=java.base/sun.nio.ch=ALL-UNNAMED",
       "--add-opens=java.base/java.nio=ALL-UNNAMED",
       "--add-opens=java.base/java.lang=ALL-UNNAMED",

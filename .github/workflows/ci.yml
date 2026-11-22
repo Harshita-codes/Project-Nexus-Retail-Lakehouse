@@ -27,6 +27,10 @@ jobs:
       - name: Set up sbt
         uses: sbt/setup-sbt@v1
 
+      - name: Test streaming transformations
+        working-directory: part2-streaming-iceberg
+        run: sbt test
+
       - name: Test producer
         working-directory: producer
         run: sbt test

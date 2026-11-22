@@ -184,9 +184,6 @@ object ProjectNexusStreamingApp {
       .option("maxOffsetsPerTrigger", "13")
       .load()
 
-    val allowedEventTypes = Seq("ORDER_CREATED", "ORDER_UPDATED", "ORDER_CANCELLED")
-    val allowedChannels   = Seq("WEB", "MOBILE_APP", "STORE")
-
     val query = kafkaStream.writeStream
       .option("checkpointLocation", checkpointDir)
       .trigger(Trigger.ProcessingTime("5 seconds"))
@@ -230,30 +227,11 @@ object ProjectNexusStreamingApp {
             .select(col("last_event_id").alias("event_id"))
             .distinct()
 
-          val dedupBatchDF = parsedDF
-            .withColumn("batch_rn", when(col("event_id").isNotNull,
-              row_number().over(Window.partitionBy("event_id").orderBy(col("ingest_ts").asc_nulls_last))
-            ).otherwise(1))
-            .join(existingEventIds.withColumn("already_seen", lit(true)), Seq("event_id"), "left")
-            .join(validCustomersDF.select(col("customer_id"), lit(true).alias("cust_ok")), Seq("customer_id"), "left")
-            .join(validProductsDF.select(col("product_id"), lit(true).alias("prod_ok")), Seq("product_id"), "left")
-
-          val evaluatedDF = dedupBatchDF.withColumn(
-            "rejection_reason",
-            concat_ws("; ",
-              when(col("event_id").isNull || !col("event_id").rlike("^EVT\\d{6}$"), lit("Invalid/missing event_id")),
-              when(col("batch_rn") > 1 || col("already_seen").isNotNull, lit("Duplicate event_id")),
-              when(col("order_id").isNull || !col("order_id").rlike("^ORD\\d{6}$"), lit("Invalid/missing order_id")),
-              when(col("event_type").isNull || !col("event_type").isin(allowedEventTypes: _*), lit("Invalid event_type (e.g. ORDER_ERR)")),
-              when(col("quantity").isNull || col("quantity") <= 0, lit("Invalid quantity (<= 0)")),
-              when(col("unit_price").isNull || col("unit_price") <= 0, lit("Invalid unit_price (<= 0)")),
-              when(col("customer_id").isNull || col("cust_ok").isNull, lit("Invalid/orphan customer_id")),
-              when(col("product_id").isNull || col("prod_ok").isNull, lit("Invalid/orphan product_id")),
-              when(col("event_ts").isNull || col("ingest_ts").isNull, lit("Invalid event_time/ingest_time")),
-              when(unix_timestamp(col("event_ts")) > unix_timestamp(col("ingest_ts")) + 86400, lit("Future-skewed event_time (> ingest_time + 1d)")),
-              when(col("sales_channel").isNotNull && !upper(trim(col("sales_channel"))).isin(allowedChannels: _*), lit("Invalid sales_channel")),
-              when(col("discount_amount").isNotNull && col("discount_amount") < 0, lit("Negative discount_amount"))
-            )
+          val evaluatedDF = evaluateEvents(
+            parsedDF,
+            existingEventIds,
+            validCustomersDF,
+            validProductsDF
           )
 
           val quarantineDF = evaluatedDF
@@ -385,26 +363,7 @@ object ProjectNexusStreamingApp {
             }
 
             val currentSilver = batchSpark.table("local.retail_nexus.silver_order_events")
-            val discountCol = if (currentSilver.columns.contains("discount_amount")) coalesce(col("discount_amount"), lit(0.00)) else lit(0.00)
-
-            val goldWindowDF = currentSilver
-              .filter(col("order_status") =!= "CANCELLED")
-              .join(validProductsDF, Seq("product_id"), "inner")
-              .withColumn("net_amt", (col("quantity") * col("unit_price")) - discountCol)
-              .groupBy(window(col("event_time"), "10 minutes").alias("w"), col("category"))
-              .agg(
-                countDistinct("order_id").alias("valid_orders"),
-                sum("quantity").alias("total_units"),
-                sum("net_amt").cast(DecimalType(14, 2)).alias("net_revenue")
-              )
-              .select(
-                col("w.start").alias("window_start"),
-                col("w.end").alias("window_end"),
-                col("category"),
-                col("valid_orders"),
-                col("total_units"),
-                col("net_revenue")
-              )
+            val goldWindowDF = aggregateGoldWindow(currentSilver, validProductsDF)
 
             goldWindowDF.writeTo("local.retail_nexus.gold_streaming_sales_window").overwritePartitions()
             println(s"[Silver & Gold] Merged $vCount valid events. Total Silver Orders now: ${currentSilver.count()}")
@@ -417,5 +376,69 @@ object ProjectNexusStreamingApp {
     println(s"=== ProjectNexusStreamingApp is listening on Kafka topic '$kafkaTopic' ===")
     println("=== Streaming query is active and waiting for Kafka micro-batches ===")
     query.awaitTermination()
+  }
+
+  private[demo] def evaluateEvents(
+      parsedDF: DataFrame,
+      existingEventIds: DataFrame,
+      validCustomersDF: DataFrame,
+      validProductsDF: DataFrame
+  ): DataFrame = {
+    val allowedEventTypes = Seq("ORDER_CREATED", "ORDER_UPDATED", "ORDER_CANCELLED")
+    val allowedChannels = Seq("WEB", "MOBILE_APP", "STORE")
+
+    val dedupBatchDF = parsedDF
+      .withColumn("batch_rn", when(col("event_id").isNotNull,
+        row_number().over(Window.partitionBy("event_id").orderBy(col("ingest_ts").asc_nulls_last))
+      ).otherwise(1))
+      .join(existingEventIds.withColumn("already_seen", lit(true)), Seq("event_id"), "left")
+      .join(validCustomersDF.select(col("customer_id"), lit(true).alias("cust_ok")), Seq("customer_id"), "left")
+      .join(validProductsDF.select(col("product_id"), lit(true).alias("prod_ok")), Seq("product_id"), "left")
+
+    dedupBatchDF.withColumn(
+      "rejection_reason",
+      concat_ws("; ",
+        when(col("event_id").isNull || !col("event_id").rlike("^EVT\\d{6}$"), lit("Invalid/missing event_id")),
+        when(col("batch_rn") > 1 || col("already_seen").isNotNull, lit("Duplicate event_id")),
+        when(col("order_id").isNull || !col("order_id").rlike("^ORD\\d{6}$"), lit("Invalid/missing order_id")),
+        when(col("event_type").isNull || !col("event_type").isin(allowedEventTypes: _*), lit("Invalid event_type (e.g. ORDER_ERR)")),
+        when(col("quantity").isNull || col("quantity") <= 0, lit("Invalid quantity (<= 0)")),
+        when(col("unit_price").isNull || col("unit_price") <= 0, lit("Invalid unit_price (<= 0)")),
+        when(col("customer_id").isNull || col("cust_ok").isNull, lit("Invalid/orphan customer_id")),
+        when(col("product_id").isNull || col("prod_ok").isNull, lit("Invalid/orphan product_id")),
+        when(col("event_ts").isNull || col("ingest_ts").isNull, lit("Invalid event_time/ingest_time")),
+        when(unix_timestamp(col("event_ts")) > unix_timestamp(col("ingest_ts")) + 86400, lit("Future-skewed event_time (> ingest_time + 1d)")),
+        when(col("sales_channel").isNotNull && !upper(trim(col("sales_channel"))).isin(allowedChannels: _*), lit("Invalid sales_channel")),
+        when(col("discount_amount").isNotNull && col("discount_amount") < 0, lit("Negative discount_amount"))
+      )
+    )
+  }
+
+  private[demo] def aggregateGoldWindow(
+      currentSilver: DataFrame,
+      validProductsDF: DataFrame
+  ): DataFrame = {
+    val discountCol =
+      if (currentSilver.columns.contains("discount_amount")) coalesce(col("discount_amount"), lit(0.00))
+      else lit(0.00)
+
+    currentSilver
+      .filter(col("order_status") =!= "CANCELLED")
+      .join(validProductsDF, Seq("product_id"), "inner")
+      .withColumn("net_amt", (col("quantity") * col("unit_price")) - discountCol)
+      .groupBy(window(col("event_time"), "10 minutes").alias("w"), col("category"))
+      .agg(
+        countDistinct("order_id").alias("valid_orders"),
+        sum("quantity").alias("total_units"),
+        sum("net_amt").cast(DecimalType(14, 2)).alias("net_revenue")
+      )
+      .select(
+        col("w.start").alias("window_start"),
+        col("w.end").alias("window_end"),
+        col("category"),
+        col("valid_orders"),
+        col("total_units"),
+        col("net_revenue")
+      )
   }
 }

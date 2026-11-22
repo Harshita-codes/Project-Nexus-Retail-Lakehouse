@@ -39,6 +39,8 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 │   ├── src/
 │   └── data/events/
 ├── .github/workflows/ci.yml
+├── docs/
+│   └── delta-vs-iceberg.md
 ├── screenshots/
 │   ├── part1-databricks/
 │   └── part2-iceberg/
@@ -47,7 +49,7 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 
 ## Automated Tests and CI
 
-The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. GitHub Actions runs those tests, assembles the producer, and compiles and packages the Spark streaming application on pushes and pull requests to `main`.
+The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. The streaming tests run Spark locally to check duplicate and invalid-event quarantine rules plus ten-minute revenue aggregation. GitHub Actions runs both test suites, assembles the producer, and compiles and packages the Spark streaming application on pushes and pull requests to `main`.
 
 Run the producer tests locally:
 
@@ -56,7 +58,16 @@ cd producer
 sbt test
 ```
 
-The workflow is defined in `.github/workflows/ci.yml`. The streaming build is compiled and packaged in CI; the workflow does not start Kafka or run a Kubernetes integration test.
+Run the streaming tests separately:
+
+```powershell
+cd part2-streaming-iceberg
+sbt test
+```
+
+The workflow is defined in `.github/workflows/ci.yml`. The workflow does not start Kafka or run a Kubernetes integration test.
+
+The implementation-based comparison, limitations, and remaining evidence to capture are documented in [docs/delta-vs-iceberg.md](docs/delta-vs-iceberg.md).
 
 ## Kafka Event Producer
 
@@ -201,6 +212,12 @@ For the checked-in 30-event producer sample, the expected Iceberg counts after p
 
 ```powershell
 kubectl exec -n streaming deployment/nexus-streaming -- /opt/spark/bin/spark-sql --master 'local[1]' --driver-memory 512m --conf spark.jars.ivy=/lakehouse/ivy2 --conf spark.sql.catalogImplementation=in-memory --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.catalog.local=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.local.type=hadoop --conf spark.sql.catalog.local.warehouse=file:///lakehouse/warehouse --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.12.0 -e "SELECT 'bronze' AS dataset, count(*) AS rows FROM local.retail_nexus.bronze_order_events UNION ALL SELECT 'silver', count(*) FROM local.retail_nexus.silver_order_events UNION ALL SELECT 'quarantine', count(*) FROM local.retail_nexus.quarantine_order_events UNION ALL SELECT 'gold_windows', count(*) FROM local.retail_nexus.gold_streaming_sales_window UNION ALL SELECT 'silver_snapshots', count(*) FROM local.retail_nexus.silver_order_events.snapshots"
+```
+
+Run the Iceberg verifier to capture the evolved schema, row samples, snapshot history, and row count at the earliest silver snapshot:
+
+```powershell
+kubectl exec -n streaming deployment/nexus-streaming -- env ICEBERG_WAREHOUSE=file:///lakehouse/warehouse SPARK_MASTER=local[1] /opt/spark/bin/spark-submit --master "local[1]" --driver-memory 512m --conf spark.jars.ivy=/lakehouse/ivy2 --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.12.0 --class com.demo.VerifyProjectNexusIceberg /opt/project-nexus/app.jar
 ```
 
 Capture the output of the count query, the Deployment/pod status, and the processing logs as evidence. The first run reads the existing `order-events` topic from the earliest offsets; do not rerun the producer unless you intend to add another test batch.

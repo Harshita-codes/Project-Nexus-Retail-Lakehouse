@@ -68,6 +68,25 @@ object VerifyProjectNexusIceberg {
     """).show(50, truncate = false)
 
     println("\n=== 6. ICEBERG SNAPSHOTS & HISTORY ON silver_order_events ===")
-    spark.sql("SELECT committed_at, snapshot_id, operation, summary['added-records'] AS added, summary['deleted-records'] AS deleted FROM local.retail_nexus.silver_order_events.snapshots").show(truncate = false)
+    val snapshotHistory = spark.sql("""
+      SELECT committed_at, snapshot_id, operation,
+             summary['added-records'] AS added,
+             summary['deleted-records'] AS deleted
+      FROM local.retail_nexus.silver_order_events.snapshots
+      ORDER BY committed_at
+    """)
+    snapshotHistory.show(truncate = false)
+
+    val earliestSnapshotId = snapshotHistory
+      .select("snapshot_id")
+      .limit(1)
+      .collect()
+      .headOption
+      .map(_.getLong(0))
+      .getOrElse(throw new IllegalStateException("No Iceberg snapshots found for silver_order_events"))
+    val earliestSnapshotRows = spark.sql(
+      s"SELECT count(*) FROM local.retail_nexus.silver_order_events VERSION AS OF $earliestSnapshotId"
+    ).first().getLong(0)
+    println(s"Iceberg time travel -> earliest snapshot $earliestSnapshotId has $earliestSnapshotRows silver rows")
   }
 }
