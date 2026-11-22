@@ -5,7 +5,8 @@ lazy val root = (project in file("."))
     name := "nexus-kafka-producer",
     libraryDependencies ++= Seq(
       "org.apache.kafka" % "kafka-clients" % "3.9.1",
-      "com.fasterxml.jackson.core" % "jackson-databind" % "2.18.2"
+      "com.fasterxml.jackson.core" % "jackson-databind" % "2.18.2",
+      "org.scalatest" %% "scalatest" % "3.2.19" % Test
     ),
     assembly / assemblyJarName := "nexus-kafka-producer.jar",
     assembly / mainClass := Some("com.nexus.producer.OrderEventProducer"),

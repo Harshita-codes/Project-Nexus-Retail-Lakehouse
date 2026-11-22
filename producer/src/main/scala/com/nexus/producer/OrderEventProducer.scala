@@ -10,6 +10,12 @@ import java.time.Instant
 import java.util.Properties
 import scala.jdk.CollectionConverters._
 
+private[producer] final case class OrderEvent(
+    orderId: String,
+    eventId: String,
+    payload: String
+)
+
 object OrderEventProducer {
   private val mapper = new ObjectMapper()
 
@@ -33,28 +39,20 @@ object OrderEventProducer {
 
     val producer = new KafkaProducer[String, String](properties)
     try {
-      val eventFiles = resolveEventFiles(Paths.get(eventDirectory))
-      if (eventFiles.isEmpty) {
+      val events = readEvents(Paths.get(eventDirectory))
+      if (events.isEmpty) {
         throw new IllegalArgumentException(
           s"No JSONL event files found in $eventDirectory"
         )
       }
 
       println(s"Kafka producer started: bootstrap=$bootstrapServers topic=$topic")
-      val publish = () => eventFiles.foreach { file =>
-        Files.readAllLines(file, StandardCharsets.UTF_8).asScala
-          .filter(_.trim.nonEmpty)
-          .foreach { payload =>
-            val json = mapper.readTree(payload)
-            val orderId = requiredString(json, "order_id")
-            producer.send(
-              new ProducerRecord[String, String](topic, orderId, payload)
-            ).get()
-            val eventId = Option(json.get("event_id"))
-              .filterNot(_.isNull).map(_.asText()).getOrElse("<missing>")
-            println(s"${Instant.now()} published event=$eventId order=$orderId")
-            Thread.sleep(intervalMs)
-          }
+      val publish = () => events.foreach { event =>
+        producer.send(
+          new ProducerRecord[String, String](topic, event.orderId, event.payload)
+        ).get()
+        println(s"${Instant.now()} published event=${event.eventId} order=${event.orderId}")
+        Thread.sleep(intervalMs)
       }
 
       publish()
@@ -70,18 +68,35 @@ object OrderEventProducer {
     }
   }
 
+  private[producer] def readEvents(directory: Path): Seq[OrderEvent] =
+    resolveEventFiles(directory).flatMap { file =>
+      Files.readAllLines(file, StandardCharsets.UTF_8).asScala
+        .filter(_.trim.nonEmpty)
+        .map { payload =>
+          val json = mapper.readTree(payload)
+          if (json == null || !json.isObject)
+            throw new IllegalArgumentException(s"Expected a JSON object in $file")
+          val orderId = requiredString(json, "order_id")
+          val eventId = Option(json.get("event_id"))
+            .filterNot(_.isNull).map(_.asText()).getOrElse("<missing>")
+          OrderEvent(orderId, eventId, payload)
+        }
+    }
+
   private def resolveEventFiles(directory: Path): Seq[Path] =
     if (Files.isRegularFile(directory)) Seq(directory)
-    else if (Files.isDirectory(directory))
-      Files.list(directory).iterator().asScala
+    else if (Files.isDirectory(directory)) {
+      val files = Files.list(directory)
+      try files.iterator().asScala
         .filter(path => path.getFileName.toString.endsWith(".jsonl"))
-        .toSeq.sortBy(_.getFileName.toString)
-    else Seq.empty
+        .toVector.sortBy(_.getFileName.toString)
+      finally files.close()
+    } else Seq.empty
 
   private def requiredString(json: JsonNode, field: String): String = {
     val node = json.get(field)
     if (node == null || node.isNull || node.asText().trim.isEmpty)
       throw new IllegalArgumentException(s"Missing required field: $field")
-    node.asText()
+    node.asText().trim
   }
 }

@@ -18,10 +18,10 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 * **Governance:** Verified via `DESCRIBE HISTORY`, Delta Time Travel (`VERSION AS OF 0` = 88 rows vs. current = 104 rows), `OPTIMIZE ... ZORDER BY`, and `VACUUM`.
 
 ### Part II: Real-Time Streaming (Kafka, Spark Structured Streaming & Apache Iceberg)
-* **Ingestion:** Consumes 5 JSON micro-batches (`order_events_001.json`–`005.json`, 62 total events) from Kafka topic `order-events` into Iceberg table `local.retail_nexus.bronze_order_events`.
-* **Stream Validation & Quarantine:** Filters malformed IDs, `ORDER_ERR` events, non-positive quantities/prices, future-skewed timestamps, cross-batch duplicates, and orphan FKs into `local.retail_nexus.quarantine_order_events` (`25` events).
-* **Stateful Upserts, Late Arrivals & Schema Evolution:** Executes `MERGE INTO` on `local.retail_nexus.silver_order_events` (`37` orders), handling `ORDER_UPDATED`, `ORDER_CANCELLED`, flagging late arrivals (`ingest_time - event_time > 10m`), and dynamically evolving `sales_channel` and `discount_amount` on batch 5.
-* **Gold Streaming Window & Snapshots:** Computes 10-minute event-time windowed category revenue in `local.retail_nexus.gold_streaming_sales_window` and verifies Iceberg snapshot history across all 5 micro-batches.
+* **Ingestion:** The checked-in producer sample publishes 30 JSON events to Kafka topic `order-events`, which are ingested into `local.retail_nexus.bronze_order_events`.
+* **Stream Validation & Quarantine:** Filters invalid and duplicate events, non-positive quantities/prices, invalid event types, and orphan foreign keys into `local.retail_nexus.quarantine_order_events` (16 events in the verified local run).
+* **Stateful Upserts, Late Arrivals & Schema Evolution:** Maintains `local.retail_nexus.silver_order_events` (12 orders in the verified local run), handling updates, cancellations, late arrivals, and the `sales_channel` and `discount_amount` fields.
+* **Gold Streaming Window & Snapshots:** Computes 10-minute event-time category revenue in `local.retail_nexus.gold_streaming_sales_window` (8 rows in the verified local run) and records Iceberg snapshots.
 
 ---
 
@@ -34,10 +34,29 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 │   ├── build.sbt
 │   ├── ProjectNexusStreamingApp.scala
 │   └── VerifyProjectNexusIceberg.scala
+├── producer/
+│   ├── build.sbt
+│   ├── src/
+│   └── data/events/
+├── .github/workflows/ci.yml
 ├── screenshots/
 │   ├── part1-databricks/
 │   └── part2-iceberg/
 └── README.md
+```
+
+## Automated Tests and CI
+
+The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. GitHub Actions runs those tests, assembles the producer, and compiles and packages the Spark streaming application on pushes and pull requests to `main`.
+
+Run the producer tests locally:
+
+```powershell
+cd producer
+sbt test
+```
+
+The workflow is defined in `.github/workflows/ci.yml`. The streaming build is compiled and packaged in CI; the workflow does not start Kafka or run a Kubernetes integration test.
 
 ## Kafka Event Producer
 
