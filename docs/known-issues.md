@@ -8,11 +8,12 @@
 - Delta Silver and Gold copies are refreshed by overwriting the full current state each batch. This is acceptable for the small sample, but causes unnecessary I/O at larger scale.
 - Delta and Iceberg do not share an atomic commit. Idempotent Delta transaction IDs and Kafka-coordinate Iceberg merges support retries, but a failed batch can temporarily leave one format ahead until recovery finishes.
 - Kafka is PLAINTEXT with no authentication in the local demo. Production deployments must configure TLS/SASL and manage credentials securely.
-- Direct ADLS Gen2 `abfss://` configuration, storage credentials, and Azure Databricks job history still need verification or a documented access blocker.
-- The latest Delta dual-write code has passed local Spark tests but has not yet been rolled out to Kubernetes or verified against the existing persistent warehouse.
-- Iceberg historical reads, schema evolution, and MERGE are covered in code/tests. Compaction, snapshot expiration, and partition evolution are not currently part of the verified demo.
+- The batch Unity Catalog managed volume and Delta table are confirmed to use ADLS Gen2 storage. A separate customer-managed external location or direct storage credential configuration is not part of this demo.
+- The Delta dual-write stream passed local Spark tests and was rolled out to the existing Kubernetes deployment. Delta and Iceberg both report 30 Bronze, 12 Silver, 16 Quarantine, and 8 Gold rows; Kafka offsets and the bound streaming PVC were preserved.
+- Iceberg schema evolution, `MERGE`, snapshots, and historical reads are verified. Compaction, snapshot expiration, and partition evolution are not part of the current demo unless explicitly required by the trainer rubric.
 - No controlled throughput, latency, or cost benchmark compares Delta and Iceberg.
-- GitHub Actions builds and tests the Scala modules and Docker images; it does not start Kafka or execute a Kubernetes integration test.
+- GitHub Actions run #5 passed on commit `fb155dd`. CI builds and tests the Scala modules and Docker images; it does not start Kafka or execute a Kubernetes integration test.
+- The presentation outline is available, but a finished slide deck or completed live presentation remains to be prepared.
 
 ## Recommended future enhancements
 

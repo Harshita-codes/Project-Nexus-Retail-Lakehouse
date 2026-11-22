@@ -7,6 +7,6 @@
 5. **Storage capabilities** — Show Delta history/time travel/maintenance; show Iceberg schema evolution, MERGE, snapshots, and the historical snapshot read. Use [delta-vs-iceberg.md](delta-vs-iceberg.md).
 6. **Kubernetes operations** — Show Deployment, Job, ConfigMap, PVC, probes/resource requests, configuration rollout/rollback, and pod recovery. Use [runbook.md](runbook.md).
 7. **Automated validation** — Show producer and streaming tests, Docker image builds, and the latest successful GitHub Actions run.
-8. **Limitations and next steps** — Explain local storage, single-pod Spark local mode, Azure access/evidence status, and the scaling opportunities in [known-issues.md](known-issues.md).
+8. **Limitations and next steps** — Explain local storage, single-pod Spark local mode, the managed Unity Catalog/ADLS boundary, and the scaling opportunities in [known-issues.md](known-issues.md).
 
-Before presenting, replace any pending evidence items in [requirements-and-assumptions.md](requirements-and-assumptions.md) with the latest run output or a precise blocker statement. Do not claim the Delta dual-write rollout or Azure/ADLS execution as complete until verified.
+Before presenting, include the latest redacted Azure and streaming screenshots from the repository. State that the Unity Catalog managed volume is ADLS-backed; do not imply a separate customer-managed external storage configuration. The dual-write rollout, runtime counts, and CI run are verified. The slide deck or completed live demonstration is still outstanding.

@@ -43,7 +43,7 @@ flowchart LR
 
 ## Storage and deployment choices
 
-- The batch notebook uses Unity Catalog Delta tables and a Databricks Volume path. Direct ADLS Gen2 `abfss://` configuration and the physical backing of that Volume must be confirmed from the Azure environment.
+- The batch notebook uses Unity Catalog Delta tables and a managed Databricks Volume. Azure metadata checks confirmed that the volume and Delta table are backed by ADLS Gen2 (`abfss://`) storage. The project does not configure a separate customer-managed external location or storage credential.
 - The local streaming app maintains Iceberg tables and mirrors all four layers to path-based Delta tables under `DELTA_WAREHOUSE`. Missing Delta copies are initialized from the current Iceberg state, allowing an existing Kafka checkpoint to continue without republishing the sample events.
 - The local deployment stores both streaming formats and the checkpoint on one persistent Docker Desktop PVC. The pod runs Spark in local mode as a single replica; the PVC is not a cloud durability or multi-writer solution.
 - Delta Bronze and Quarantine appends carry a stable application ID and micro-batch transaction version. Iceberg Bronze and Quarantine merges use Kafka partition and offset as replay-stable keys.

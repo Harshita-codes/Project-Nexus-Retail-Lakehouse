@@ -15,7 +15,7 @@ This is an implementation comparison, not a controlled benchmark. Delta processe
 
 ## Verified streaming results
 
-The previously verified Iceberg run of the checked-in 30-event sample yielded 30 bronze rows, 12 silver orders, 16 quarantined events, and 8 gold windows. The updated app is expected to mirror those counts to Delta; this dual-write version still needs a Kubernetes rollout and runtime verification. These counts are not a like-for-like comparison with the batch pipeline's 104 silver rows.
+The updated app was deployed and verified against the existing Kubernetes warehouse. The checked-in 30-event sample yielded matching counts in both formats: 30 bronze rows, 12 silver orders, 16 quarantined events, and 8 gold windows. The Iceberg verifier confirmed the evolved schema and that the earliest silver snapshot contains 5 rows. These counts are not a like-for-like comparison with the batch pipeline's 104 silver rows.
 
 ## Trade-offs and open requirements
 
@@ -25,6 +25,6 @@ The previously verified Iceberg run of the checked-in 30-event sample yielded 30
 - The trainer checklist requires batch and streaming outputs in Delta, plus Iceberg aggregates. The streaming pipeline now writes all four layers to Delta and keeps the Iceberg tables.
 - Delta is a natural fit here for the Databricks/Unity Catalog batch tables and their maintenance workflow; Iceberg demonstrates an open table format for streaming outputs and snapshot-based reads. The project does not establish a universal format winner.
 
-## Evidence to capture
+## Evidence captured and still to collect
 
-Capture the Delta row counts, history/time-travel/maintenance outputs, and the Iceberg verifier's schema, snapshot history, and historical row count. The dual-write changes have not yet been deployed to the Kubernetes cluster in this session.
+The repository screenshots capture the batch Delta governance results, Azure/ADLS backing, streaming schema and row counts, Iceberg history/time travel, Delta copies, and Kubernetes PVC status. A controlled same-workload performance benchmark has not been run; do not make relative speed or cost claims without one.
