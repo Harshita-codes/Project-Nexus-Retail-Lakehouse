@@ -6,7 +6,7 @@ ENV SPARK_HOME=/opt/spark
 ENV PATH="${SPARK_HOME}/bin:${PATH}"
 COPY --from=spark-distribution --chown=185:0 /opt/spark /opt/spark
 WORKDIR /opt/project-nexus
-COPY --chown=185:0 target/out/jvm/scala-2.12.18/kafkastreamingicebergdemo/kafkastreamingicebergdemo_2.12-0.1.0-SNAPSHOT.jar /opt/project-nexus/app.jar
+COPY --chown=185:0 target/app.jar /opt/project-nexus/app.jar
 
 RUN useradd --uid 185 --gid 0 --create-home --home-dir /home/spark --shell /usr/sbin/nologin spark
 ENV HOME=/home/spark

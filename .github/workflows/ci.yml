@@ -43,10 +43,6 @@ jobs:
         working-directory: producer
         run: docker build -t nexus-kafka-producer:ci .
 
-      - name: Clean streaming build output
-        working-directory: part2-streaming-iceberg
-        run: sbt clean
-
       - name: Compile streaming application
         working-directory: part2-streaming-iceberg
         run: sbt compile
@@ -54,6 +50,10 @@ jobs:
       - name: Package streaming application
         working-directory: part2-streaming-iceberg
         run: sbt package
+
+      - name: Stage streaming JAR for Docker
+        working-directory: part2-streaming-iceberg
+        run: cp target/out/jvm/scala-2.12.18/kafkastreamingicebergdemo/kafkastreamingicebergdemo_2.12-0.1.0-SNAPSHOT.jar target/app.jar
 
       - name: Build streaming image
         working-directory: part2-streaming-iceberg

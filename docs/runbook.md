@@ -12,6 +12,7 @@ docker build -t nexus-kafka-producer:1.0 .
 cd ..\part2-streaming-iceberg
 sbt test
 sbt package
+Copy-Item .\target\out\jvm\scala-2.12.18\kafkastreamingicebergdemo\kafkastreamingicebergdemo_2.12-0.1.0-SNAPSHOT.jar .\target\app.jar -Force
 docker build -t nexus-streaming:1.0 .
 kubectl apply -f .\k8s\streaming-config.yaml
 kubectl apply -f .\k8s\streaming-state-pvc.yaml
