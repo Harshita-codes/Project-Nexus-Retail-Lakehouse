@@ -40,7 +40,9 @@ jobs:
         run: docker build -t nexus-batch:ci .
 
       - name: Validate batch Kubernetes manifests
-        run: kubectl apply --dry-run=client --validate=false -f part1-batch-databricks/k8s/
+        uses: docker://ghcr.io/yannh/kubeconform:v0.6.7
+        with:
+          args: -strict -summary part1-batch-databricks/k8s/
 
       - name: Test streaming transformations
         working-directory: part2-streaming-iceberg
