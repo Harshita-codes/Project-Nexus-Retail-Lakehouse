@@ -1,24 +1,46 @@
 // Databricks notebook source
-val basePath = "/Volumes/nexus/default/retail_nexus_volume/batch"
+// COMMAND ----------
+// MAGIC %run ./00_batch_helpers
+import com.nexus.batch.BatchHelpers
+
+// COMMAND ----------
+
+dbutils.widgets.text("batch_input_path", "/Volumes/nexus/default/retail_nexus_volume/batch", "Batch input path")
+dbutils.widgets.text("target_catalog", "nexus", "Output catalog")
+dbutils.widgets.text("target_schema", "retail_nexus", "Output schema")
+dbutils.widgets.text("run_date", java.time.LocalDate.now.toString, "Run date (yyyy-MM-dd)")
+
+val basePath = dbutils.widgets.get("batch_input_path").stripSuffix("/")
+val targetCatalog = dbutils.widgets.get("target_catalog")
+val targetSchema = dbutils.widgets.get("target_schema")
+val outputNamespace = s"$targetCatalog.$targetSchema"
+def targetTable(name: String): String = s"$outputNamespace.$name"
+val runDate = dbutils.widgets.get("run_date")
+
+require(targetCatalog.matches("[A-Za-z_][A-Za-z0-9_]*"), "target_catalog must be a valid identifier")
+require(targetSchema.matches("[A-Za-z_][A-Za-z0-9_]*"), "target_schema must be a valid identifier")
+require(runDate.matches("\\d{4}-\\d{2}-\\d{2}"), "run_date must use yyyy-MM-dd")
 
 val files = Seq(
-  "data_dictionary.csv",
-  "raw/products/products.csv",
-  "raw/customers/customers.csv",
-  "raw/orders/orders.csv",
-  "incremental/orders_updates/orders_updates.csv",
-  "schema_evolution/orders_v2/orders_v2.csv"
+  "data_dictionary.csv" -> None,
+  "raw/products/products.csv" -> Some(BatchHelpers.productsSchema),
+  "raw/customers/customers.csv" -> Some(BatchHelpers.customersSchema),
+  "raw/orders/orders.csv" -> Some(BatchHelpers.ordersSchema),
+  "incremental/orders_updates/orders_updates.csv" -> Some(BatchHelpers.ordersSchema),
+  "schema_evolution/orders_v2/orders_v2.csv" -> Some(BatchHelpers.ordersV2Schema)
 )
 
-files.foreach { f =>
+files.foreach { case (f, schema) =>
   println(s"=== $f ===")
-  spark.read.option("header", "true").csv(s"$basePath/$f").show(5, truncate = false)
+  val reader = spark.read.option("header", "true")
+  schema.foreach(reader.schema)
+  reader.csv(s"$basePath/$f").show(5, truncate = false)
 }
 
 // COMMAND ----------
 
 spark.read.option("header", "true")
-  .csv("/Volumes/nexus/default/retail_nexus_volume/batch/data_dictionary.csv")
+  .csv(s"$basePath/data_dictionary.csv")
   .show(100, truncate = false)
 
 // COMMAND ----------
@@ -27,48 +49,52 @@ spark.read.option("header", "true")
 
 import org.apache.spark.sql.functions._
 
-val basePath = "/Volumes/nexus/default/retail_nexus_volume/batch"
-
 // Create a dedicated schema for Project Nexus so tables stay organized
-spark.sql("CREATE SCHEMA IF NOT EXISTS nexus.retail_nexus")
+spark.sql(s"CREATE SCHEMA IF NOT EXISTS $outputNamespace")
 
 // 1. Ingest Products (Bronze)
 val productsBronze = spark.read
   .option("header", "true")
+  .schema(BatchHelpers.productsSchema)
   .csv(s"$basePath/raw/products/products.csv")
+  .withColumn("_run_date", to_date(lit(runDate)))
   .withColumn("_ingested_at", current_timestamp())
 
 productsBronze.write
   .format("delta")
   .mode("overwrite")
-  .saveAsTable("nexus.retail_nexus.bronze_products")
+  .saveAsTable(s"$outputNamespace.bronze_products")
 
 // 2. Ingest Customers (Bronze)
 val customersBronze = spark.read
   .option("header", "true")
+  .schema(BatchHelpers.customersSchema)
   .csv(s"$basePath/raw/customers/customers.csv")
+  .withColumn("_run_date", to_date(lit(runDate)))
   .withColumn("_ingested_at", current_timestamp())
 
 customersBronze.write
   .format("delta")
   .mode("overwrite")
-  .saveAsTable("nexus.retail_nexus.bronze_customers")
+  .saveAsTable(s"$outputNamespace.bronze_customers")
 
 // 3. Ingest Orders (Bronze)
 val ordersBronze = spark.read
   .option("header", "true")
+  .schema(BatchHelpers.ordersSchema)
   .csv(s"$basePath/raw/orders/orders.csv")
+  .withColumn("_run_date", to_date(lit(runDate)))
   .withColumn("_ingested_at", current_timestamp())
 
 ordersBronze.write
   .format("delta")
   .mode("overwrite")
-  .saveAsTable("nexus.retail_nexus.bronze_orders")
+  .saveAsTable(s"$outputNamespace.bronze_orders")
 
 // Verify Bronze counts
-println(s"Bronze Products Count:  ${spark.table("nexus.retail_nexus.bronze_products").count()}")
-println(s"Bronze Customers Count: ${spark.table("nexus.retail_nexus.bronze_customers").count()}")
-println(s"Bronze Orders Count:    ${spark.table("nexus.retail_nexus.bronze_orders").count()}")
+println(s"Bronze Products Count:  ${spark.table(s"$outputNamespace.bronze_products").count()}")
+println(s"Bronze Customers Count: ${spark.table(s"$outputNamespace.bronze_customers").count()}")
+println(s"Bronze Orders Count:    ${spark.table(s"$outputNamespace.bronze_orders").count()}")
 
 // COMMAND ----------
 
@@ -78,7 +104,7 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.types._
 
-val productsBronze = spark.table("nexus.retail_nexus.bronze_products")
+val productsBronze = spark.table(targetTable("bronze_products"))
 
 // 1. Standardize strings & cast price
 val productsTyped = productsBronze
@@ -103,17 +129,14 @@ val productsDeduped = productsTyped
 val allowedCategories = Seq("Electronics", "Apparel", "Home", "Grocery", "Beauty", "Sports")
 
 // 3. Apply validation rules & tag rejection reasons
-val productsEvaluated = productsDeduped.withColumn(
-  "rejection_reason",
-  concat_ws("; ",
-    when(col("is_dup"), lit("Duplicate product_id")),
-    when(col("product_id").isNull || !col("product_id").rlike("^PRD\\d{3}$"), lit("Invalid/missing product_id")),
-    when(col("product_name").isNull || col("product_name") === "", lit("Missing product_name")),
-    when(col("category").isNull || !col("category").isin(allowedCategories: _*), lit("Invalid/missing category")),
-    when(col("unit_price_dec").isNull || col("unit_price_dec") <= 0, lit("Invalid unit_price (<= 0 or non-numeric)")),
-    when(col("active").isNull || !col("active").isin("Y", "N"), lit("Invalid active flag"))
-  )
-)
+val productsEvaluated = BatchHelpers.withRejectionReasons(productsDeduped, Seq(
+  col("is_dup") -> "Duplicate product_id",
+  !BatchHelpers.matchesPattern(col("product_id"), "^PRD\\d{3}$") -> "Invalid/missing product_id",
+  !BatchHelpers.nonBlank(col("product_name")) -> "Missing product_name",
+  !col("category").isin(allowedCategories: _*) -> "Invalid/missing category",
+  !BatchHelpers.positiveDecimal(col("unit_price_dec")) -> "Invalid unit_price (<= 0 or non-numeric)",
+  !col("active").isin("Y", "N") -> "Invalid active flag"
+))
 
 // 4. Write Silver & Quarantine tables
 val productsSilver = productsEvaluated
@@ -132,8 +155,8 @@ val productsQuarantine = productsEvaluated
   .drop("rn", "is_dup", "unit_price_dec")
   .withColumn("_quarantined_at", current_timestamp())
 
-productsSilver.write.format("delta").mode("overwrite").saveAsTable("nexus.retail_nexus.silver_products")
-productsQuarantine.write.format("delta").mode("overwrite").saveAsTable("nexus.retail_nexus.quarantine_products")
+productsSilver.write.format("delta").mode("overwrite").saveAsTable(targetTable("silver_products"))
+productsQuarantine.write.format("delta").mode("overwrite").saveAsTable(targetTable("quarantine_products"))
 
 println(s"Silver Products:     ${productsSilver.count()}")
 println(s"Quarantine Products: ${productsQuarantine.count()}")
@@ -143,7 +166,7 @@ productsQuarantine.select("product_id", "product_name", "unit_price", "rejection
 
 //section-B Silver customers
 
-val customersBronze = spark.table("nexus.retail_nexus.bronze_customers")
+val customersBronze = spark.table(targetTable("bronze_customers"))
 
 val customersTyped = customersBronze
   .withColumn("customer_id", upper(trim(col("customer_id"))))
@@ -162,17 +185,14 @@ val customersDeduped = customersTyped
 
 val emailRegex = "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$"
 
-val customersEvaluated = customersDeduped.withColumn(
-  "rejection_reason",
-  concat_ws("; ",
-    when(col("is_dup"), lit("Duplicate customer_id")),
-    when(col("customer_id").isNull || !col("customer_id").rlike("^CUST\\d{3}$"), lit("Invalid/missing customer_id")),
-    when(col("customer_name").isNull || col("customer_name") === "", lit("Missing customer_name")),
-    when(col("email").isNull || !col("email").rlike(emailRegex), lit("Invalid/missing email")),
-    when(col("city").isNull || col("city") === "", lit("Missing city")),
-    when(col("signup_date_parsed").isNull || col("signup_date_parsed") > current_date(), lit("Invalid or future signup_date"))
-  )
-)
+val customersEvaluated = BatchHelpers.withRejectionReasons(customersDeduped, Seq(
+  col("is_dup") -> "Duplicate customer_id",
+  !BatchHelpers.matchesPattern(col("customer_id"), "^CUST\\d{3}$") -> "Invalid/missing customer_id",
+  !BatchHelpers.nonBlank(col("customer_name")) -> "Missing customer_name",
+  !BatchHelpers.matchesPattern(col("email"), emailRegex) -> "Invalid/missing email",
+  !BatchHelpers.nonBlank(col("city")) -> "Missing city",
+  (col("signup_date_parsed").isNull || col("signup_date_parsed") > current_date()) -> "Invalid or future signup_date"
+))
 
 val customersSilver = customersEvaluated
   .filter(col("rejection_reason") === "")
@@ -190,8 +210,8 @@ val customersQuarantine = customersEvaluated
   .drop("rn", "is_dup", "signup_date_parsed")
   .withColumn("_quarantined_at", current_timestamp())
 
-customersSilver.write.format("delta").mode("overwrite").saveAsTable("nexus.retail_nexus.silver_customers")
-customersQuarantine.write.format("delta").mode("overwrite").saveAsTable("nexus.retail_nexus.quarantine_customers")
+customersSilver.write.format("delta").mode("overwrite").saveAsTable(targetTable("silver_customers"))
+customersQuarantine.write.format("delta").mode("overwrite").saveAsTable(targetTable("quarantine_customers"))
 
 println(s"Silver Customers:     ${customersSilver.count()}")
 println(s"Quarantine Customers: ${customersQuarantine.count()}")
@@ -200,7 +220,7 @@ customersQuarantine.select("customer_id", "customer_name", "email", "signup_date
 // COMMAND ----------
 
 // Recover dd/MM/yyyy signup_date for CUST022 and DLVRD status for ORD000054
-val customersFixed = spark.table("nexus.retail_nexus.bronze_customers")
+val customersFixed = spark.table(targetTable("bronze_customers"))
   .withColumn("customer_id", upper(trim(col("customer_id"))))
   .withColumn("customer_name", trim(col("customer_name")))
   .withColumn("email", lower(trim(col("email"))))
@@ -214,9 +234,9 @@ val customersFixed = spark.table("nexus.retail_nexus.bronze_customers")
 
 // Section-C Silver Orders
 
-val ordersBronze = spark.table("nexus.retail_nexus.bronze_orders")
-val validCustIds = spark.table("nexus.retail_nexus.silver_customers").select("customer_id").distinct()
-val validProdIds = spark.table("nexus.retail_nexus.silver_products").select("product_id").distinct()
+val ordersBronze = spark.table(targetTable("bronze_orders"))
+val validCustIds = spark.table(targetTable("silver_customers")).select("customer_id").distinct()
+val validProdIds = spark.table(targetTable("silver_products")).select("product_id").distinct()
 
 val ordersTyped = ordersBronze
   .withColumn("order_id", upper(trim(col("order_id"))))
@@ -251,23 +271,20 @@ val ordersDeduped = ordersTyped
 
 val ordersWithFk = ordersDeduped
   .join(validCustIds.withColumn("cust_exists", lit(true)), Seq("customer_id"), "left")
-  .join(validProdIds.withColumn("prod_exists", lit(true)), Seq("product_id"), "left")
+  .join(broadcast(validProdIds).withColumn("prod_exists", lit(true)), Seq("product_id"), "left")
 
 val allowedStatuses = Seq("PLACED", "SHIPPED", "DELIVERED", "CANCELLED", "RETURNED")
 
-val ordersEvaluated = ordersWithFk.withColumn(
-  "rejection_reason",
-  concat_ws("; ",
-    when(col("is_dup"), lit("Duplicate/stale order_id version")),
-    when(col("order_id").isNull || !col("order_id").rlike("^ORD\\d{6}$"), lit("Invalid/missing order_id")),
-    when(col("customer_id").isNull || col("cust_exists").isNull, lit("Orphan/missing customer_id")),
-    when(col("product_id").isNull || col("prod_exists").isNull, lit("Orphan/missing product_id")),
-    when(col("quantity_int").isNull || col("quantity_int") <= 0, lit("Invalid quantity (<= 0)")),
-    when(col("order_date_parsed").isNull || col("order_date_parsed") > current_date(), lit("Invalid or future order_date")),
-    when(col("order_status_clean").isNull || !col("order_status_clean").isin(allowedStatuses: _*), lit("Invalid order_status")),
-    when(col("last_updated_ts").isNull, lit("Invalid/missing last_updated timestamp"))
-  )
-)
+val ordersEvaluated = BatchHelpers.withRejectionReasons(ordersWithFk, Seq(
+  col("is_dup") -> "Duplicate/stale order_id version",
+  !BatchHelpers.matchesPattern(col("order_id"), "^ORD\\d{6}$") -> "Invalid/missing order_id",
+  (col("customer_id").isNull || col("cust_exists").isNull) -> "Orphan/missing customer_id",
+  (col("product_id").isNull || col("prod_exists").isNull) -> "Orphan/missing product_id",
+  (col("quantity_int").isNull || col("quantity_int") <= 0) -> "Invalid quantity (<= 0)",
+  (col("order_date_parsed").isNull || col("order_date_parsed") > current_date()) -> "Invalid or future order_date",
+  !col("order_status_clean").isin(allowedStatuses: _*) -> "Invalid order_status",
+  col("last_updated_ts").isNull -> "Invalid/missing last_updated timestamp"
+))
 
 val ordersSilver = ordersEvaluated
   .filter(col("rejection_reason") === "")
@@ -287,8 +304,8 @@ val ordersQuarantine = ordersEvaluated
   .drop("rn", "is_dup", "quantity_int", "order_date_parsed", "order_status_clean", "last_updated_ts", "cust_exists", "prod_exists")
   .withColumn("_quarantined_at", current_timestamp())
 
-ordersSilver.write.format("delta").mode("overwrite").saveAsTable("nexus.retail_nexus.silver_orders")
-ordersQuarantine.write.format("delta").mode("overwrite").saveAsTable("nexus.retail_nexus.quarantine_orders")
+ordersSilver.write.format("delta").mode("overwrite").saveAsTable(targetTable("silver_orders"))
+ordersQuarantine.write.format("delta").mode("overwrite").saveAsTable(targetTable("quarantine_orders"))
 
 println(s"Silver Orders:     ${ordersSilver.count()}")
 println(s"Quarantine Orders: ${ordersQuarantine.count()}")
@@ -302,15 +319,17 @@ import io.delta.tables._
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.expressions.Window
 
-val basePath = "/Volumes/nexus/default/retail_nexus_volume/batch"
-val validCustIds = spark.table("nexus.retail_nexus.silver_customers").select("customer_id").distinct()
-val validProdIds = spark.table("nexus.retail_nexus.silver_products").select("product_id").distinct()
+val basePath = dbutils.widgets.get("batch_input_path").stripSuffix("/")
+val validCustIds = spark.table(targetTable("silver_customers")).select("customer_id").distinct()
+val validProdIds = spark.table(targetTable("silver_products")).select("product_id").distinct()
 val allowedStatuses = Seq("PLACED", "SHIPPED", "DELIVERED", "CANCELLED", "RETURNED")
 
 // 1. Read & standardize incremental updates
 val updatesRaw = spark.read
   .option("header", "true")
+  .schema(BatchHelpers.ordersSchema)
   .csv(s"$basePath/incremental/orders_updates/orders_updates.csv")
+  .withColumn("_run_date", to_date(lit(runDate)))
   .withColumn("_ingested_at", current_timestamp())
 
 println(s"Raw incremental rows read: ${updatesRaw.count()}")
@@ -348,21 +367,18 @@ val updatesDeduped = updatesTyped
 
 val updatesWithFk = updatesDeduped
   .join(validCustIds.withColumn("cust_exists", lit(true)), Seq("customer_id"), "left")
-  .join(validProdIds.withColumn("prod_exists", lit(true)), Seq("product_id"), "left")
+  .join(broadcast(validProdIds).withColumn("prod_exists", lit(true)), Seq("product_id"), "left")
 
-val updatesEvaluated = updatesWithFk.withColumn(
-  "rejection_reason",
-  concat_ws("; ",
-    when(col("is_dup"), lit("Duplicate/stale incremental order_id")),
-    when(col("order_id").isNull || !col("order_id").rlike("^ORD\\d{6}$"), lit("Invalid/missing order_id")),
-    when(col("customer_id").isNull || col("cust_exists").isNull, lit("Orphan/missing customer_id")),
-    when(col("product_id").isNull || col("prod_exists").isNull, lit("Orphan/missing product_id")),
-    when(col("quantity_int").isNull || col("quantity_int") <= 0, lit("Invalid quantity (<= 0)")),
-    when(col("order_date_parsed").isNull || col("order_date_parsed") > current_date(), lit("Invalid or future order_date")),
-    when(col("order_status_clean").isNull || !col("order_status_clean").isin(allowedStatuses: _*), lit("Invalid order_status")),
-    when(col("last_updated_ts").isNull, lit("Invalid/missing last_updated timestamp"))
-  )
-)
+val updatesEvaluated = BatchHelpers.withRejectionReasons(updatesWithFk, Seq(
+  col("is_dup") -> "Duplicate/stale incremental order_id",
+  !BatchHelpers.matchesPattern(col("order_id"), "^ORD\\d{6}$") -> "Invalid/missing order_id",
+  (col("customer_id").isNull || col("cust_exists").isNull) -> "Orphan/missing customer_id",
+  (col("product_id").isNull || col("prod_exists").isNull) -> "Orphan/missing product_id",
+  (col("quantity_int").isNull || col("quantity_int") <= 0) -> "Invalid quantity (<= 0)",
+  (col("order_date_parsed").isNull || col("order_date_parsed") > current_date()) -> "Invalid or future order_date",
+  !col("order_status_clean").isin(allowedStatuses: _*) -> "Invalid order_status",
+  col("last_updated_ts").isNull -> "Invalid/missing last_updated timestamp"
+))
 
 // Append any bad incremental rows to quarantine_orders
 val badUpdates = updatesEvaluated
@@ -374,7 +390,7 @@ val badUpdates = updatesEvaluated
   )
 
 if (badUpdates.count() > 0) {
-  badUpdates.write.format("delta").mode("append").saveAsTable("nexus.retail_nexus.quarantine_orders")
+  badUpdates.write.format("delta").mode("append").saveAsTable(targetTable("quarantine_orders"))
   println(s"Quarantined incremental rows: ${badUpdates.count()}")
   badUpdates.select("order_id", "customer_id", "product_id", "order_status", "rejection_reason").show(truncate = false)
 }
@@ -395,7 +411,7 @@ val cleanUpdates = updatesEvaluated
 println(s"Valid incremental rows ready for MERGE: ${cleanUpdates.count()}")
 
 // 2. Delta MERGE INTO guarded by last_updated
-val silverOrdersDelta = DeltaTable.forName(spark, "nexus.retail_nexus.silver_orders")
+val silverOrdersDelta = DeltaTable.forName(spark, targetTable("silver_orders"))
 
 silverOrdersDelta.alias("target")
   .merge(
@@ -416,7 +432,7 @@ silverOrdersDelta.alias("target")
   .insertAll()
   .execute()
 
-println(s"Silver Orders count AFTER MERGE: ${spark.table("nexus.retail_nexus.silver_orders").count()}")
+println(s"Silver Orders count AFTER MERGE: ${spark.table(targetTable("silver_orders")).count()}")
 
 // COMMAND ----------
 
@@ -425,16 +441,18 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.types._
 
-val basePath = "/Volumes/nexus/default/retail_nexus_volume/batch"
-val validCustIds = spark.table("nexus.retail_nexus.silver_customers").select("customer_id").distinct()
-val validProdIds = spark.table("nexus.retail_nexus.silver_products").select("product_id").distinct()
+val basePath = dbutils.widgets.get("batch_input_path").stripSuffix("/")
+val validCustIds = spark.table(targetTable("silver_customers")).select("customer_id").distinct()
+val validProdIds = spark.table(targetTable("silver_products")).select("product_id").distinct()
 val allowedStatuses = Seq("PLACED", "SHIPPED", "DELIVERED", "CANCELLED", "RETURNED")
 val allowedChannels = Seq("WEB", "MOBILE_APP", "STORE")
 
 // 1. Read orders_v2.csv
 val ordersV2Raw = spark.read
   .option("header", "true")
+  .schema(BatchHelpers.ordersV2Schema)
   .csv(s"$basePath/schema_evolution/orders_v2/orders_v2.csv")
+  .withColumn("_run_date", to_date(lit(runDate)))
   .withColumn("_ingested_at", current_timestamp())
 
 println(s"Raw orders_v2 rows read: ${ordersV2Raw.count()}")
@@ -475,23 +493,20 @@ val ordersV2Deduped = ordersV2Typed
 
 val ordersV2WithFk = ordersV2Deduped
   .join(validCustIds.withColumn("cust_exists", lit(true)), Seq("customer_id"), "left")
-  .join(validProdIds.withColumn("prod_exists", lit(true)), Seq("product_id"), "left")
+  .join(broadcast(validProdIds).withColumn("prod_exists", lit(true)), Seq("product_id"), "left")
 
-val ordersV2Evaluated = ordersV2WithFk.withColumn(
-  "rejection_reason",
-  concat_ws("; ",
-    when(col("is_dup"), lit("Duplicate/stale v2 order_id")),
-    when(col("order_id").isNull || !col("order_id").rlike("^ORD\\d{6}$"), lit("Invalid/missing order_id")),
-    when(col("customer_id").isNull || col("cust_exists").isNull, lit("Orphan/missing customer_id")),
-    when(col("product_id").isNull || col("prod_exists").isNull, lit("Orphan/missing product_id")),
-    when(col("quantity_int").isNull || col("quantity_int") <= 0, lit("Invalid quantity (<= 0)")),
-    when(col("order_date_parsed").isNull || col("order_date_parsed") > current_date(), lit("Invalid or future order_date")),
-    when(col("order_status_clean").isNull || !col("order_status_clean").isin(allowedStatuses: _*), lit("Invalid order_status")),
-    when(col("last_updated_ts").isNull, lit("Invalid/missing last_updated timestamp")),
-    when(col("sales_channel_clean").isNull || !col("sales_channel_clean").isin(allowedChannels: _*), lit("Invalid/missing sales_channel")),
-    when(col("discount_amount_dec").isNull || col("discount_amount_dec") < 0, lit("Invalid discount_amount (< 0)"))
-  )
-)
+val ordersV2Evaluated = BatchHelpers.withRejectionReasons(ordersV2WithFk, Seq(
+  col("is_dup") -> "Duplicate/stale v2 order_id",
+  !BatchHelpers.matchesPattern(col("order_id"), "^ORD\\d{6}$") -> "Invalid/missing order_id",
+  (col("customer_id").isNull || col("cust_exists").isNull) -> "Orphan/missing customer_id",
+  (col("product_id").isNull || col("prod_exists").isNull) -> "Orphan/missing product_id",
+  (col("quantity_int").isNull || col("quantity_int") <= 0) -> "Invalid quantity (<= 0)",
+  (col("order_date_parsed").isNull || col("order_date_parsed") > current_date()) -> "Invalid or future order_date",
+  !col("order_status_clean").isin(allowedStatuses: _*) -> "Invalid order_status",
+  col("last_updated_ts").isNull -> "Invalid/missing last_updated timestamp",
+  !col("sales_channel_clean").isin(allowedChannels: _*) -> "Invalid/missing sales_channel",
+  (col("discount_amount_dec").isNull || col("discount_amount_dec") < 0) -> "Invalid discount_amount (< 0)"
+))
 
 // Quarantine any invalid v2 rows (merging new v2 columns into quarantine_orders)
 val badV2 = ordersV2Evaluated
@@ -504,7 +519,7 @@ val badV2 = ordersV2Evaluated
   )
 
 if (badV2.count() > 0) {
-  badV2.write.format("delta").option("mergeSchema", "true").mode("append").saveAsTable("nexus.retail_nexus.quarantine_orders")
+  badV2.write.format("delta").option("mergeSchema", "true").mode("append").saveAsTable(targetTable("quarantine_orders"))
   println(s"Quarantined v2 rows: ${badV2.count()}")
   badV2.select("order_id", "sales_channel", "discount_amount", "rejection_reason").show(truncate = false)
 }
@@ -531,9 +546,9 @@ cleanV2.write
   .format("delta")
   .option("mergeSchema", "true")
   .mode("append")
-  .saveAsTable("nexus.retail_nexus.silver_orders")
+  .saveAsTable(targetTable("silver_orders"))
 
-val evolvedSilver = spark.table("nexus.retail_nexus.silver_orders")
+val evolvedSilver = spark.table(targetTable("silver_orders"))
 println(s"Silver Orders count AFTER Schema Evolution: ${evolvedSilver.count()}")
 evolvedSilver.printSchema()
 evolvedSilver.filter(col("sales_channel").isNotNull).show(5, truncate = false)
@@ -544,13 +559,13 @@ evolvedSilver.filter(col("sales_channel").isNotNull).show(5, truncate = false)
 // sec-5A: Gold Aggregations
 import org.apache.spark.sql.functions._
 
-val orders = spark.table("nexus.retail_nexus.silver_orders")
-val products = spark.table("nexus.retail_nexus.silver_products")
-val customers = spark.table("nexus.retail_nexus.silver_customers")
+val orders = spark.table(targetTable("silver_orders"))
+val products = spark.table(targetTable("silver_products"))
+val customers = spark.table(targetTable("silver_customers"))
 
 val enrichedSales = orders
   .filter(col("order_status") =!= "CANCELLED")
-  .join(products, Seq("product_id"), "inner")
+  .join(broadcast(products), Seq("product_id"), "inner")
   .join(customers, Seq("customer_id"), "inner")
   .withColumn("gross_amount", col("quantity") * col("unit_price"))
   .withColumn("discount_applied", coalesce(col("discount_amount"), lit(0.00)))
@@ -566,7 +581,7 @@ val goldCategory = enrichedSales
   )
   .orderBy(col("total_net_revenue").desc)
 
-goldCategory.write.format("delta").mode("overwrite").saveAsTable("nexus.retail_nexus.gold_category_sales")
+goldCategory.write.format("delta").mode("overwrite").saveAsTable(targetTable("gold_category_sales"))
 goldCategory.show(truncate = false)
 
 // Gold 2: Top Customers by Net Spend
@@ -578,7 +593,7 @@ val goldCustomerSpend = enrichedSales
   )
   .orderBy(col("lifetime_net_spend").desc)
 
-goldCustomerSpend.write.format("delta").mode("overwrite").saveAsTable("nexus.retail_nexus.gold_customer_spend")
+goldCustomerSpend.write.format("delta").mode("overwrite").saveAsTable(targetTable("gold_customer_spend"))
 goldCustomerSpend.show(10, truncate = false)
 
 // COMMAND ----------
@@ -586,18 +601,18 @@ goldCustomerSpend.show(10, truncate = false)
 // sec-5B: Delta Lake Governance
 
 // 1. Audit History of silver_orders (shows Version 0: Initial Load, Version 1: MERGE, Version 2: Schema Evolution)
-display(spark.sql("DESCRIBE HISTORY nexus.retail_nexus.silver_orders"))
+display(spark.sql(s"DESCRIBE HISTORY ${targetTable("silver_orders")}"))
 
 // 2. Time Travel: Compare Version 0 (initial Silver load) vs Current Version
-val v0Count = spark.read.option("versionAsOf", 0).table("nexus.retail_nexus.silver_orders").count()
-val currentCount = spark.table("nexus.retail_nexus.silver_orders").count()
+val v0Count = spark.read.option("versionAsOf", 0).table(targetTable("silver_orders")).count()
+val currentCount = spark.table(targetTable("silver_orders")).count()
 println(s"Time Travel Check -> Version 0 Count: $v0Count | Current Version Count: $currentCount")
 
 // 3. File Compaction (OPTIMIZE with ZORDER on order_date, customer_id)
-display(spark.sql("OPTIMIZE nexus.retail_nexus.silver_orders ZORDER BY (order_date, customer_id)"))
+display(spark.sql(s"OPTIMIZE ${targetTable("silver_orders")} ZORDER BY (order_date, customer_id)"))
 
 // 4. Clean up stale files (VACUUM with default 168-hour retention)
-display(spark.sql("VACUUM nexus.retail_nexus.silver_orders RETAIN 168 HOURS"))
+display(spark.sql(s"VACUUM ${targetTable("silver_orders")} RETAIN 168 HOURS"))
 
 // COMMAND ----------
 

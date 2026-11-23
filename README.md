@@ -20,8 +20,8 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 ### Part II: Real-Time Streaming (Kafka, Spark Structured Streaming, Delta Lake & Iceberg)
 * **Ingestion:** The checked-in producer sample publishes 30 JSON events to Kafka topic `order-events`; the app writes them to Iceberg and is configured to mirror them into Delta.
 * **Stream Validation & Quarantine:** Filters invalid and duplicate events, non-positive quantities/prices, invalid event types, and orphan foreign keys (16 events in the verified Iceberg run); the updated app also writes quarantine records to Delta.
-* **Stateful Upserts, Late Arrivals & Schema Evolution:** Maintains Iceberg silver (12 orders in the verified local run), handling updates, cancellations, late arrivals, and the `sales_channel` and `discount_amount` fields; the updated app mirrors this state to Delta.
-* **Gold Streaming Window & Snapshots:** Computes 10-minute event-time category revenue (8 rows in the verified Iceberg run), records Iceberg snapshots, and is configured to mirror the aggregate to Delta.
+* **Stateful Upserts, Late Arrivals & Schema Evolution:** Maintains Iceberg silver (12 orders in the verified local run), handling updates, cancellations, and the `sales_channel` and `discount_amount` fields; the updated app mirrors this state to Delta. A configurable 10-minute event-time watermark is persisted on the PVC; late events remain in Bronze and are quarantined instead of changing Silver.
+* **Gold Streaming Window & Snapshots:** Computes configurable 10-minute event-time category revenue (8 rows in the verified Iceberg run), records Iceberg snapshots, and mirrors the aggregate to Delta.
 
 ---
 
@@ -29,7 +29,9 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 
 ```text
 ├── part1-batch-databricks/
+│   ├── 00_batch_helpers.scala
 │   ├── 01_bronze_ingestion.scala
+│   ├── test-harness/
 │   └── screenshots/
 ├── part2-streaming-iceberg/
 │   ├── build.sbt
@@ -48,13 +50,21 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 │   ├── delta-vs-iceberg.md
 │   ├── runbook.md
 │   ├── known-issues.md
-│   └── final-presentation-outline.md
+│   ├── final-presentation-outline.md
+│   └── live-demo-checklist.md
 └── README.md
 ```
 
 ## Automated Tests and CI
 
-The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. The streaming tests run Spark locally to check validation/quarantine rules, ten-minute revenue aggregation, Delta retry idempotency and schema evolution/time travel, and Iceberg replay idempotency and bootstrap. GitHub Actions runs both test suites, packages both Scala projects, and builds both Docker images on pushes and pull requests to `main`.
+The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. The batch helper tests check raw CSV schemas and rejection-reason generation. The streaming tests run Spark locally to check validation/quarantine rules, persisted watermark behavior, ten-minute revenue aggregation, Delta retry idempotency and schema evolution/time travel, and Iceberg replay idempotency and bootstrap. GitHub Actions is configured to run these suites, package both Scala projects, and build both Docker images on pushes and pull requests to `main`; the newest local changes have not yet been pushed through CI.
+
+Run the batch helper tests locally:
+
+```powershell
+cd part1-batch-databricks\test-harness
+sbt test
+```
 
 Run the producer tests locally:
 
@@ -73,6 +83,7 @@ sbt test
 The workflow is defined in `.github/workflows/ci.yml`. The workflow does not start Kafka or run a Kubernetes integration test.
 
 The implementation-based comparison, limitations, and remaining evidence to capture are documented in [docs/delta-vs-iceberg.md](docs/delta-vs-iceberg.md).
+The live walkthrough sequence and safe preflight steps are in [docs/live-demo-checklist.md](docs/live-demo-checklist.md).
 
 ## Kafka Event Producer
 

@@ -10,6 +10,9 @@ data:
   ICEBERG_WAREHOUSE: file:///lakehouse/warehouse
   DELTA_WAREHOUSE: file:///lakehouse/delta/retail_nexus
   STREAM_CHECKPOINT_DIR: file:///lakehouse/checkpoints/project_nexus
+  EVENT_TIME_WATERMARK_DELAY_SECONDS: "600"
+  EVENT_TIME_WATERMARK_STATE_FILE: /lakehouse/watermark/event-time-watermark.txt
+  GOLD_WINDOW_SECONDS: "600"
   SPARK_MASTER: local[*]
   SPARK_SHUFFLE_PARTITIONS: "4"
   READY_FILE: /tmp/nexus-streaming-ready

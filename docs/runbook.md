@@ -21,6 +21,7 @@ kubectl rollout status deployment/nexus-streaming -n streaming --timeout=8m
 ```
 
 If upgrading the existing local deployment, keep `nexus-stream-state` and the Kafka PVC. The new app copies existing Iceberg table contents into Delta paths if the Delta tables do not exist; it uses the existing checkpoint and does not require rerunning the producer.
+The ConfigMap sets a 600-second event-time watermark and 600-second Gold windows. The maximum accepted event time is persisted in `/lakehouse/watermark/event-time-watermark.txt` on the same PVC. Events older than the active watermark are still preserved in Bronze and are written to Quarantine; do not delete the watermark state or checkpoint when rolling out the app.
 
 When rebuilding the same `nexus-streaming:1.0` tag for an existing Deployment, applying the manifest alone does not change its pod template. Restart the Deployment to load the rebuilt local image and any updated ConfigMap values:
 

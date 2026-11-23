@@ -8,7 +8,11 @@ import org.apache.spark.sql.streaming.Trigger
 import org.apache.spark.sql.types._
 
 import java.nio.charset.StandardCharsets
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.StandardCopyOption
 import java.nio.file.{Files, Paths}
+import java.sql.Timestamp
+import java.time.Instant
 
 object ProjectNexusStreamingApp {
   def main(args: Array[String]): Unit = {
@@ -51,6 +55,16 @@ object ProjectNexusStreamingApp {
     val kafkaBootstrapServers = sys.env.getOrElse("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
     val kafkaTopic = sys.env.getOrElse("KAFKA_TOPIC", "order-events")
     val shufflePartitions = sys.env.getOrElse("SPARK_SHUFFLE_PARTITIONS", "4")
+    val goldWindowSeconds = positiveLongEnv("GOLD_WINDOW_SECONDS", 600L)
+    val watermarkDelaySeconds = positiveLongEnv("EVENT_TIME_WATERMARK_DELAY_SECONDS", 600L)
+    val watermarkStore = new EventTimeWatermarkStore(
+      Paths.get(sys.env.getOrElse(
+        "EVENT_TIME_WATERMARK_STATE_FILE",
+        if (isWindows) "C:/kafkastreamingicebergdemo/checkpoints/project_nexus/event-time-watermark.txt"
+        else "/lakehouse/watermark/event-time-watermark.txt"
+      )),
+      watermarkDelaySeconds
+    )
     val readyFile = Paths.get(sys.env.getOrElse("READY_FILE", "/tmp/nexus-streaming-ready"))
 
     val spark = SparkSession.builder()
@@ -207,7 +221,18 @@ object ProjectNexusStreamingApp {
       .option("maxOffsetsPerTrigger", "13")
       .load()
 
-    val query = kafkaStream.writeStream
+    val eventTimeStream = kafkaStream
+      .withColumn("event_payload", from_json(col("value").cast(StringType), eventJsonSchema))
+      .withColumn("event_ts", to_timestamp(col("event_payload.event_time")))
+      .withWatermark("event_ts", s"$watermarkDelaySeconds seconds")
+
+    val existingSilverMaxEventTime = spark.table("local.retail_nexus.silver_order_events")
+      .agg(max(col("event_time")).alias("max_event_time"))
+      .first()
+      .getAs[Timestamp]("max_event_time")
+    watermarkStore.observe(Option(existingSilverMaxEventTime))
+
+    val query = eventTimeStream.writeStream
       .option("checkpointLocation", checkpointDir)
       .trigger(Trigger.ProcessingTime("5 seconds"))
       .foreachBatch { (batchDF: DataFrame, batchId: Long) =>
@@ -253,11 +278,14 @@ object ProjectNexusStreamingApp {
             .select(col("last_event_id").alias("event_id"))
             .distinct()
 
+          val currentWatermark = watermarkStore.currentWatermark
+          println(s"[Event-time watermark] Current cutoff: ${currentWatermark.map(_.toInstant.toString).getOrElse("not initialized")}")
           val evaluatedDF = evaluateEvents(
             parsedDF,
             existingEventIds,
             validCustomersDF,
-            validProductsDF
+            validProductsDF,
+            currentWatermark
           )
 
           val quarantineDF = evaluatedDF
@@ -304,7 +332,10 @@ object ProjectNexusStreamingApp {
                   .when(col("event_type") === "ORDER_UPDATED", lit("UPDATED"))
                   .otherwise(lit("PLACED"))
               )
-              .withColumn("is_late_arrival", (unix_timestamp(col("ingest_ts")) - unix_timestamp(col("event_ts"))) > 600)
+              .withColumn(
+                "is_late_arrival",
+                (unix_timestamp(col("ingest_ts")) - unix_timestamp(col("event_ts"))) > watermarkDelaySeconds
+              )
 
             val silverColsNow = batchSpark.table("local.retail_nexus.silver_order_events").columns.toSet
 
@@ -392,12 +423,18 @@ object ProjectNexusStreamingApp {
 
             val currentSilver = batchSpark.table("local.retail_nexus.silver_order_events")
             overwriteDeltaSnapshot(currentSilver, s"$deltaWarehousePath/silver_order_events")
-            val goldWindowDF = aggregateGoldWindow(currentSilver, validProductsDF)
+            val goldWindowDF = aggregateGoldWindow(currentSilver, validProductsDF, goldWindowSeconds)
 
             goldWindowDF.writeTo("local.retail_nexus.gold_streaming_sales_window").overwritePartitions()
             overwriteDeltaSnapshot(goldWindowDF, s"$deltaWarehousePath/gold_streaming_sales_window")
             println(s"[Silver & Gold] Merged $vCount valid events. Total Silver Orders now: ${currentSilver.count()}")
           }
+
+          val maxEventTimeRow = validEventsDF
+            .agg(max(col("event_ts")).alias("max_event_time"))
+            .first()
+          watermarkStore.observe(Option(maxEventTimeRow.getAs[Timestamp]("max_event_time")))
+          println(s"[Event-time watermark] Advanced cutoff: ${watermarkStore.currentWatermark.map(_.toInstant.toString).getOrElse("not initialized")}")
         }
       }
       .start()
@@ -412,7 +449,8 @@ object ProjectNexusStreamingApp {
       parsedDF: DataFrame,
       existingEventIds: DataFrame,
       validCustomersDF: DataFrame,
-      validProductsDF: DataFrame
+      validProductsDF: DataFrame,
+      eventTimeWatermark: Option[Timestamp] = None
   ): DataFrame = {
     val allowedEventTypes = Seq("ORDER_CREATED", "ORDER_UPDATED", "ORDER_CANCELLED")
     val allowedChannels = Seq("WEB", "MOBILE_APP", "STORE")
@@ -438,6 +476,9 @@ object ProjectNexusStreamingApp {
         when(col("product_id").isNull || col("prod_ok").isNull, lit("Invalid/orphan product_id")),
         when(col("event_ts").isNull || col("ingest_ts").isNull, lit("Invalid event_time/ingest_time")),
         when(unix_timestamp(col("event_ts")) > unix_timestamp(col("ingest_ts")) + 86400, lit("Future-skewed event_time (> ingest_time + 1d)")),
+        eventTimeWatermark
+          .map(watermark => when(col("event_ts") < lit(watermark), lit("Event is older than event-time watermark")))
+          .getOrElse(lit(null).cast(StringType)),
         when(col("sales_channel").isNotNull && !upper(trim(col("sales_channel"))).isin(allowedChannels: _*), lit("Invalid sales_channel")),
         when(col("discount_amount").isNotNull && col("discount_amount") < 0, lit("Negative discount_amount"))
       )
@@ -446,8 +487,10 @@ object ProjectNexusStreamingApp {
 
   private[demo] def aggregateGoldWindow(
       currentSilver: DataFrame,
-      validProductsDF: DataFrame
+      validProductsDF: DataFrame,
+      windowSeconds: Long = 600L
   ): DataFrame = {
+    require(windowSeconds > 0, "Gold window duration must be positive")
     val discountCol =
       if (currentSilver.columns.contains("discount_amount")) coalesce(col("discount_amount"), lit(0.00))
       else lit(0.00)
@@ -456,7 +499,7 @@ object ProjectNexusStreamingApp {
       .filter(col("order_status") =!= "CANCELLED")
       .join(validProductsDF, Seq("product_id"), "inner")
       .withColumn("net_amt", (col("quantity") * col("unit_price")) - discountCol)
-      .groupBy(window(col("event_time"), "10 minutes").alias("w"), col("category"))
+      .groupBy(window(col("event_time"), s"$windowSeconds seconds").alias("w"), col("category"))
       .agg(
         countDistinct("order_id").alias("valid_orders"),
         sum("quantity").alias("total_units"),
@@ -470,6 +513,12 @@ object ProjectNexusStreamingApp {
         col("total_units"),
         col("net_revenue")
       )
+  }
+
+  private[demo] def positiveLongEnv(name: String, default: Long): Long = {
+    val value = sys.env.get(name).map(_.toLong).getOrElse(default)
+    require(value > 0, s"$name must be a positive integer")
+    value
   }
 
   private[demo] def appendDeltaBatch(
@@ -491,6 +540,42 @@ object ProjectNexusStreamingApp {
       .mode("overwrite")
       .option("overwriteSchema", "true")
       .save(path)
+
+  private[demo] final class EventTimeWatermarkStore(path: java.nio.file.Path, delaySeconds: Long) {
+    require(delaySeconds > 0, "Watermark delay must be positive")
+
+    def maxObservedEventTime: Option[Timestamp] = {
+      if (!Files.exists(path)) None
+      else {
+        val stored = new String(Files.readAllBytes(path), StandardCharsets.UTF_8).trim
+        if (stored.isEmpty) None else Some(Timestamp.from(Instant.parse(stored)))
+      }
+    }
+
+    def currentWatermark: Option[Timestamp] =
+      maxObservedEventTime.map(ts => Timestamp.from(ts.toInstant.minusSeconds(delaySeconds)))
+
+    def observe(candidate: Option[Timestamp]): Unit = candidate.foreach { next =>
+      val previous = maxObservedEventTime
+      val latest = previous.fold(next)(seen => if (next.after(seen)) next else seen)
+      if (!previous.contains(latest)) {
+        val absolutePath = path.toAbsolutePath
+        val parent = absolutePath.getParent
+        Files.createDirectories(parent)
+        val temporary = Files.createTempFile(parent, "event-time-watermark-", ".tmp")
+        try {
+          Files.write(temporary, latest.toInstant.toString.getBytes(StandardCharsets.UTF_8))
+          try Files.move(temporary, absolutePath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+          catch {
+            case _: AtomicMoveNotSupportedException =>
+              Files.move(temporary, absolutePath, StandardCopyOption.REPLACE_EXISTING)
+          }
+        } finally {
+          Files.deleteIfExists(temporary)
+        }
+      }
+    }
+  }
 
   private[demo] def initializeDeltaCopies(spark: SparkSession, warehousePath: String): Unit = {
     val tables = Seq(

@@ -110,6 +110,55 @@ class ProjectNexusStreamingAppSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(reasons("ORD000015").contains("Negative discount_amount"))
   }
 
+  test("quarantines events older than the persisted event-time watermark") {
+    val parsed = createParsedEvents(Seq(
+      event("EVT000020", "ORD000020", 1, 10.0, timestamp("2026-11-20 09:59:59"), timestamp("2026-11-20 10:01:00")),
+      event("EVT000021", "ORD000021", 1, 10.0, timestamp("2026-11-20 10:00:00"), timestamp("2026-11-20 10:01:00"))
+    ))
+    val existingIds = createDataFrame(
+      Seq.empty[Row],
+      StructType(Seq(StructField("event_id", StringType, nullable = true)))
+    )
+    val customers = createDataFrame(
+      Seq(Row("CUST001")),
+      StructType(Seq(StructField("customer_id", StringType, nullable = false)))
+    )
+    val products = createDataFrame(
+      Seq(Row("PRD001")),
+      StructType(Seq(StructField("product_id", StringType, nullable = false)))
+    )
+
+    val reasons = ProjectNexusStreamingApp
+      .evaluateEvents(parsed, existingIds, customers, products, Some(timestamp("2026-11-20 10:00:00")))
+      .select("order_id", "rejection_reason")
+      .collect()
+      .map(row => row.getString(0) -> row.getString(1))
+      .toMap
+
+    assert(reasons("ORD000020").contains("older than event-time watermark"))
+    assert(reasons("ORD000021").isEmpty)
+  }
+
+  test("persists a monotonic event-time watermark across app restarts") {
+    val root = Files.createTempDirectory("event-time-watermark")
+    val path = root.resolve("state.txt")
+
+    try {
+      val store = new ProjectNexusStreamingApp.EventTimeWatermarkStore(path, 600L)
+      assert(store.currentWatermark.isEmpty)
+
+      store.observe(Some(timestamp("2026-11-20 10:20:00")))
+      assert(store.currentWatermark.contains(timestamp("2026-11-20 10:10:00")))
+
+      store.observe(Some(timestamp("2026-11-20 10:15:00")))
+      val restored = new ProjectNexusStreamingApp.EventTimeWatermarkStore(path, 600L)
+      assert(restored.maxObservedEventTime.contains(timestamp("2026-11-20 10:20:00")))
+      assert(restored.currentWatermark.contains(timestamp("2026-11-20 10:10:00")))
+    } finally {
+      deleteRecursively(root)
+    }
+  }
+
   test("calculates discounted revenue in ten-minute windows and excludes cancelled orders") {
     val silverSchema = StructType(Seq(
       StructField("order_id", StringType, nullable = false),
@@ -139,6 +188,7 @@ class ProjectNexusStreamingAppSpec extends AnyFunSuite with BeforeAndAfterAll {
     assert(result.getAs[Long]("total_units") == 3L)
     assert(result.getAs[java.math.BigDecimal]("net_revenue").compareTo(new java.math.BigDecimal("24.00")) == 0)
     assert(result.getAs[String]("category") == "Electronics")
+    assert(ProjectNexusStreamingApp.aggregateGoldWindow(silver, products, 300L).count() == 2L)
   }
 
   test("Delta append writes are idempotent for a retried micro-batch") {

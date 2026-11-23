@@ -27,6 +27,10 @@ jobs:
       - name: Set up sbt
         uses: sbt/setup-sbt@v1
 
+      - name: Test batch validation helpers
+        working-directory: part1-batch-databricks/test-harness
+        run: sbt test
+
       - name: Test streaming transformations
         working-directory: part2-streaming-iceberg
         run: sbt test

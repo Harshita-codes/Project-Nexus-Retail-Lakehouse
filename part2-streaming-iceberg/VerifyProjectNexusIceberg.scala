@@ -98,7 +98,29 @@ object VerifyProjectNexusIceberg {
     ).first().getLong(0)
     println(s"Iceberg time travel -> earliest snapshot $earliestSnapshotId has $earliestSnapshotRows silver rows")
 
-    println("\n=== 7. DELTA COPIES OF STREAMING TABLES ===")
+    println("\n=== 7. GOLD AGGREGATE SNAPSHOTS & HISTORY ===")
+    val goldSnapshotHistory = spark.sql("""
+      SELECT committed_at, snapshot_id, operation,
+             summary['added-records'] AS added,
+             summary['deleted-records'] AS deleted
+      FROM local.retail_nexus.gold_streaming_sales_window.snapshots
+      ORDER BY committed_at
+    """)
+    goldSnapshotHistory.show(truncate = false)
+
+    val earliestGoldSnapshotId = goldSnapshotHistory
+      .select("snapshot_id")
+      .limit(1)
+      .collect()
+      .headOption
+      .map(_.getLong(0))
+      .getOrElse(throw new IllegalStateException("No Iceberg snapshots found for gold_streaming_sales_window"))
+    val earliestGoldSnapshotRows = spark.sql(
+      s"SELECT count(*) FROM local.retail_nexus.gold_streaming_sales_window VERSION AS OF $earliestGoldSnapshotId"
+    ).first().getLong(0)
+    println(s"Iceberg time travel -> earliest Gold snapshot $earliestGoldSnapshotId has $earliestGoldSnapshotRows rows")
+
+    println("\n=== 8. DELTA COPIES OF STREAMING TABLES ===")
     Seq("bronze_order_events", "silver_order_events", "quarantine_order_events", "gold_streaming_sales_window")
       .foreach { tableName =>
         val deltaRows = spark.read.format("delta").load(s"$deltaWarehousePath/$tableName").count()
