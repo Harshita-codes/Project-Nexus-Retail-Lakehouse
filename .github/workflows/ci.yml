@@ -31,6 +31,17 @@ jobs:
         working-directory: part1-batch-databricks/test-harness
         run: sbt test
 
+      - name: Test batch Spark application
+        working-directory: part1-batch-databricks
+        run: sbt test
+
+      - name: Build batch Spark image
+        working-directory: part1-batch-databricks
+        run: docker build -t nexus-batch:ci .
+
+      - name: Validate batch Kubernetes manifests
+        run: kubectl apply --dry-run=client --validate=false -f part1-batch-databricks/k8s/
+
       - name: Test streaming transformations
         working-directory: part2-streaming-iceberg
         run: sbt test

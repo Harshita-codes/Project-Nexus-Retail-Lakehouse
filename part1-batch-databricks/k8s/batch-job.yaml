@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nexus-batch
+  namespace: streaming
+  labels:
+    app: nexus-batch
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: nexus-batch
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 185
+      containers:
+        - name: nexus-batch
+          image: nexus-batch:1.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: nexus-batch-config
+          env:
+            - name: SPARK_LOCAL_DIRS
+              value: /tmp/spark-local
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          volumeMounts:
+            - name: batch-data
+              mountPath: /data/batch
+              readOnly: true
+            - name: batch-output
+              mountPath: /lakehouse/batch
+            - name: spark-local
+              mountPath: /tmp/spark-local
+      volumes:
+        - name: batch-data
+          configMap:
+            name: nexus-batch-data
+            defaultMode: 0444
+        - name: batch-output
+          persistentVolumeClaim:
+            claimName: nexus-batch-output
+        - name: spark-local
+          emptyDir: {}

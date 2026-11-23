@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexus-batch-config
+  namespace: streaming
+data:
+  BATCH_INPUT_PATH: /data/batch
+  BATCH_OUTPUT_PATH: /lakehouse/batch
+  BATCH_RUN_DATE: "2026-11-23"
+  BATCH_OUTPUT_FORMAT: delta
+  SPARK_SHUFFLE_PARTITIONS: "4"

@@ -17,6 +17,8 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 * **Gold Analytics:** Builds `gold_category_sales` and `gold_customer_spend` (excluding `CANCELLED` orders).
 * **Governance:** Verified via `DESCRIBE HISTORY`, Delta Time Travel (`VERSION AS OF 0` = 88 rows vs. current = 104 rows), `OPTIMIZE ... ZORDER BY`, and `VACUUM`.
 
+Azure Databricks/ADLS remains the primary cloud batch implementation. A separate local Kubernetes batch app demonstrates the same base products, customers, and orders validation using Spark local mode and writes Delta outputs to a dedicated local PVC. It complements, not replaces, the Databricks workflow; the local demo does not perform the Databricks incremental `MERGE` or schema-evolution steps. Kubernetes input/output storage is local demonstration storage, not ADLS, unless external storage access is separately configured.
+
 ### Part II: Real-Time Streaming (Kafka, Spark Structured Streaming, Delta Lake & Iceberg)
 * **Ingestion:** The checked-in producer sample publishes 30 JSON events to Kafka topic `order-events`; the app writes them to Iceberg and is configured to mirror them into Delta.
 * **Stream Validation & Quarantine:** Filters invalid and duplicate events, non-positive quantities/prices, invalid event types, and orphan foreign keys (16 events in the verified Iceberg run); the updated app also writes quarantine records to Delta.
@@ -31,6 +33,10 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 ├── part1-batch-databricks/
 │   ├── 00_batch_helpers.scala
 │   ├── 01_bronze_ingestion.scala
+│   ├── build.sbt
+│   ├── Dockerfile
+│   ├── k8s/
+│   ├── src/
 │   ├── test-harness/
 │   └── screenshots/
 ├── part2-streaming-iceberg/
@@ -57,14 +63,60 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 
 ## Automated Tests and CI
 
-The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. The batch helper tests check raw CSV schemas and rejection-reason generation. The streaming tests run Spark locally to check validation/quarantine rules, persisted watermark behavior, ten-minute revenue aggregation, Delta retry idempotency and schema evolution/time travel, and Iceberg replay idempotency and bootstrap. GitHub Actions runs these suites, packages both Scala projects, and builds both Docker images on pushes and pull requests to `main`. The latest pushed change, commit `fb06c33`, passed [CI run #7](https://github.com/Harshita-codes/Project-Nexus-Retail-Lakehouse/actions/runs/45143048325).
+The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. Batch helper tests check raw CSV schemas and rejection reasons; the batch-app tests exercise local Spark validation and Delta outputs. Streaming tests check validation/quarantine rules, persisted watermark behavior, ten-minute revenue aggregation, Delta retry idempotency and schema evolution/time travel, and Iceberg replay idempotency and bootstrap. GitHub Actions runs these suites, builds the producer and batch images, validates Kubernetes manifests, and packages the streaming app on pushes and pull requests to `main`. See the [CI workflow](.github/workflows/ci.yml) and its latest run on the repository's Actions page.
 
-Run the batch helper tests locally:
+Run the Databricks helper tests:
 
 ```powershell
 cd part1-batch-databricks\test-harness
 sbt test
 ```
+
+The batch app is tested in the Docker build's Linux stage and in CI. On Windows, Hadoop's local filesystem tests require `winutils.exe`; use the Docker build to run the batch integration tests without installing it locally:
+
+```powershell
+cd part1-batch-databricks
+docker build -t nexus-batch:1.0 .
+```
+
+### Local Kubernetes batch demo
+
+The app accepts flat `products.csv`, `customers.csv`, and `orders.csv` files, or the corresponding nested files under `raw/products`, `raw/customers`, and `raw/orders`. It writes Delta `bronze/`, `silver/`, `quarantine/`, and `gold/` directories under the configured output path and prints row counts and elapsed time. The Databricks notebook remains unchanged.
+
+For a local container run, place the three CSVs in `part1-batch-databricks\batch-input` and run:
+
+```powershell
+cd part1-batch-databricks
+New-Item -ItemType Directory -Force .\batch-output | Out-Null
+docker run --rm `
+  -e BATCH_INPUT_PATH=/data/batch `
+  -e BATCH_OUTPUT_PATH=/lakehouse/batch `
+  -e BATCH_RUN_DATE=2026-11-23 `
+  -e BATCH_OUTPUT_FORMAT=delta `
+  -v "${PWD}\batch-input:/data/batch:ro" `
+  -v "${PWD}\batch-output:/lakehouse/batch" `
+  nexus-batch:1.0
+```
+
+For Kubernetes, first copy the CSVs from the approved batch source into `batch-input`. ConfigMaps are limited to 1 MiB; use a separate input PVC instead if the files exceed that limit. Then create/update the input ConfigMap and apply the batch PVC, config, and Job:
+
+```powershell
+kubectl create configmap nexus-batch-data -n streaming `
+  --from-file=products.csv=.\batch-input\products.csv `
+  --from-file=customers.csv=.\batch-input\customers.csv `
+  --from-file=orders.csv=.\batch-input\orders.csv `
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f .\k8s\batch-pvc.yaml
+kubectl apply -f .\k8s\batch-config.yaml
+kubectl delete job nexus-batch -n streaming --ignore-not-found
+kubectl apply -f .\k8s\batch-job.yaml
+kubectl wait --for=condition=complete job/nexus-batch -n streaming --timeout=10m
+kubectl get jobs,pods,pvc -n streaming
+kubectl get pod -n streaming -l job-name=nexus-batch -o yaml
+kubectl logs -n streaming job/nexus-batch
+```
+
+The output uses a new `nexus-batch-output` PVC and does not touch the streaming PVC, Kafka topic, or checkpoint. Do not apply a CronJob until the one-shot Job has completed successfully.
 
 Run the producer tests locally:
 

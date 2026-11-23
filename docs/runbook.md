@@ -1,6 +1,27 @@
 # Local Docker Desktop Runbook
 
-This runbook operates the producer and streaming app in Kubernetes namespace `streaming`. It assumes the images are built locally and the current namespace contains the Kafka Deployment and Service.
+This runbook covers the Databricks batch Job, local Kubernetes batch demo, producer, and streaming app. Kubernetes examples use namespace `streaming`; the producer/streaming procedures assume the existing Kafka Deployment and Service are available.
+
+## Azure Databricks batch Job validation
+
+The Databricks notebook remains the primary cloud batch implementation. These steps validate the revised notebook as a parameterized Job; the local Kubernetes batch app below is a separate demonstration.
+
+1. In Azure Databricks, open **Workspace → Repos**, select the project repository, and pull the latest `main`. Alternatively, import `01_bronze_ingestion.scala` and `00_batch_helpers.scala` into the same workspace folder; `%run ./00_batch_helpers` requires that placement.
+2. Open **Workflows/Jobs & Pipelines → Create Job → Notebook task**. Select `01_bronze_ingestion.scala` and attach the Databricks cluster that can read the Unity Catalog volume.
+3. Configure the notebook task parameters:
+
+   | Parameter | Value |
+   |---|---|
+   | `batch_input_path` | `/Volumes/nexus/default/retail_nexus_volume/batch` |
+   | `target_catalog` | `nexus` |
+   | `target_schema` | `retail_nexus_validation` |
+   | `run_date` | A valid `yyyy-MM-dd` date, such as `2026-11-23` |
+
+   The notebook overwrites its output tables. Use the new validation schema rather than `nexus.retail_nexus` to preserve the existing outputs. Ensure you have permission to create tables in that schema.
+4. Run the Job and confirm all tasks succeed. Verify Bronze counts of 27 products, 42 customers, and 161 orders; final Silver orders should be 104. Check the `sales_channel` and `discount_amount` evolved columns and both Gold tables.
+5. Capture the successful Job run page (status, parameters, duration/history), row-count outputs, evolved schema, and table locations as new screenshots in `part1-batch-databricks/screenshots/`. Keep screenshots `01`–`16`.
+
+Running the notebook with **Run all** can help debug it, but does not replace the required Job/Workflow run-history evidence.
 
 ## Build and deploy
 
@@ -54,6 +75,29 @@ The temporary value should be `2`; after rollback and reapplying the checked-in 
 ## Producer scaling demo
 
 The producer Deployment manifest is intentionally configured with zero replicas and a separate `order-events-scaling-demo` topic. Build the producer image, create that topic, and follow the scaling commands in the root [README](../README.md) only during a controlled demo. Scale it back to zero afterward. Do not point it at `order-events` or rerun the one-time producer Job if preserving the current streaming outputs and Kafka offsets.
+
+## Local Kubernetes batch Job
+
+The local batch app processes only the base products, customers, and orders inputs. It does not replace the Databricks notebook's incremental `MERGE` or schema-evolution work. The app writes Delta outputs to the separate `nexus-batch-output` PVC; it does not use or modify the streaming PVC, Kafka topic, or checkpoint.
+
+Build the image and prepare the input CSVs as described in the root [README](../README.md). The input ConfigMap must be named `nexus-batch-data` and contain `products.csv`, `customers.csv`, and `orders.csv`. Do not put credentials in the ConfigMap. If the combined files exceed the 1 MiB ConfigMap limit, mount them from a separate input PVC instead.
+
+```powershell
+cd .\part1-batch-databricks
+docker build -t nexus-batch:1.0 .
+kubectl apply -f .\k8s\batch-pvc.yaml
+kubectl apply -f .\k8s\batch-config.yaml
+kubectl delete job nexus-batch -n streaming --ignore-not-found
+kubectl apply -f .\k8s\batch-job.yaml
+kubectl get jobs,pods,pvc -n streaming
+kubectl wait --for=condition=complete job/nexus-batch -n streaming --timeout=10m
+kubectl get pod -n streaming -l job-name=nexus-batch -o yaml
+kubectl logs -n streaming job/nexus-batch
+```
+
+The logs print Bronze, Silver, Quarantine, and Gold counts plus elapsed time. Save those logs and the Job/Pod/PVC status as evidence. The checked-in `batch-config.yaml` run date is an example; update it to a valid run date before applying. Do not add a CronJob until this one-shot Job succeeds.
+
+For a safe image-pull failure exercise, copy `batch-job.yaml` to a temporary manifest, change its Job name to `nexus-batch-broken` and its image to `nexus-batch:not-present`, then apply that temporary manifest. Inspect the Pod and events with `kubectl describe pod` and `kubectl get events`; an `ErrImagePull` Pod will not start the batch app or write output. Capture the failure, then delete only the test Job with `kubectl delete job nexus-batch-broken -n streaming`. Kubernetes Jobs are not generally mutable; do not rely on `kubectl set image job/...` to change an existing Job. Keep the successful `nexus-batch` Job and its evidence.
 
 ## Pod recovery
 
