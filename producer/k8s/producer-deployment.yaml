@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexus-order-event-producer-demo-config
+  namespace: streaming
+data:
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_TOPIC: order-events-scaling-demo
+  EVENT_FILE_PATH: /app/data/events
+  PRODUCER_INTERVAL_MS: "500"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-order-event-producer-demo
+  namespace: streaming
+  labels:
+    app: nexus-order-event-producer-demo
+  annotations:
+    nexus.project/activation: "replicas=0; scale only for an isolated-topic demo"
+spec:
+  replicas: 0
+  revisionHistoryLimit: 2
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nexus-order-event-producer-demo
+  template:
+    metadata:
+      labels:
+        app: nexus-order-event-producer-demo
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: producer
+          image: nexus-kafka-producer:1.0
+          imagePullPolicy: Never
+          args:
+            - --continuous
+          envFrom:
+            - configMapRef:
+                name: nexus-order-event-producer-demo-config
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}

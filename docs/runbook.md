@@ -6,7 +6,6 @@ This runbook operates the producer and streaming app in Kubernetes namespace `st
 
 ```powershell
 cd producer
-sbt assembly
 docker build -t nexus-kafka-producer:1.0 .
 
 cd ..\part2-streaming-iceberg
@@ -51,6 +50,10 @@ kubectl apply -f .\k8s\streaming-deployment.yaml
 ```
 
 The temporary value should be `2`; after rollback and reapplying the checked-in manifest, it should be `4`.
+
+## Producer scaling demo
+
+The producer Deployment manifest is intentionally configured with zero replicas and a separate `order-events-scaling-demo` topic. Build the producer image, create that topic, and follow the scaling commands in the root [README](../README.md) only during a controlled demo. Scale it back to zero afterward. Do not point it at `order-events` or rerun the one-time producer Job if preserving the current streaming outputs and Kafka offsets.
 
 ## Pod recovery
 

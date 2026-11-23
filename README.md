@@ -131,7 +131,6 @@ The repository includes a one-pass Job manifest for the existing Docker Desktop 
 
 ```powershell
 cd producer
-sbt assembly
 docker build -t nexus-kafka-producer:1.0 .
 kubectl create namespace streaming --dry-run=client -o yaml | kubectl apply -f -
 kubectl exec -n streaming deployment/kafka -- /opt/kafka/bin/kafka-topics.sh `
@@ -147,6 +146,26 @@ The Job sends each sample record once and exits. Remove the completed Job before
 ```powershell
 kubectl delete job nexus-order-event-producer -n streaming
 ```
+
+### Producer scaling demo
+
+The separate producer Deployment starts with zero replicas and publishes only to `order-events-scaling-demo`; it does not feed the existing streaming pipeline or alter its `order-events` offsets. Build the image first, create the isolated topic, then scale the Deployment only for the demo:
+
+```powershell
+cd producer
+docker build -t nexus-kafka-producer:1.0 .
+kubectl exec -n streaming deployment/kafka -- /opt/kafka/bin/kafka-topics.sh `
+  --bootstrap-server kafka:9092 --create --if-not-exists `
+  --topic order-events-scaling-demo --partitions 3 --replication-factor 1
+kubectl apply -f k8s/producer-deployment.yaml
+kubectl scale deployment/nexus-order-event-producer-demo -n streaming --replicas=1
+kubectl get pods -n streaming -l app=nexus-order-event-producer-demo
+kubectl scale deployment/nexus-order-event-producer-demo -n streaming --replicas=3
+kubectl get pods -n streaming -l app=nexus-order-event-producer-demo
+kubectl scale deployment/nexus-order-event-producer-demo -n streaming --replicas=0
+```
+
+Each replica replays the sample set continuously, so duplicate sample events are expected in this demo topic. Scale back to zero when evidence is captured. Do not change the Deployment's topic to `order-events` or rerun the existing one-time Job when preserving current streaming output.
 
 ### Sample event files
 
@@ -167,7 +186,6 @@ Run Docker from the `producer/` directory:
 
 ```bash
 cd producer
-sbt assembly
 docker build -t nexus-kafka-producer:1.0 .
 docker run --rm \
   -e KAFKA_BOOTSTRAP_SERVERS=host.docker.internal:9092 \

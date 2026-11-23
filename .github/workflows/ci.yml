@@ -39,10 +39,6 @@ jobs:
         working-directory: producer
         run: sbt test
 
-      - name: Assemble producer
-        working-directory: producer
-        run: sbt assembly
-
       - name: Build producer image
         working-directory: producer
         run: docker build -t nexus-kafka-producer:ci .
