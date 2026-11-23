@@ -13,8 +13,10 @@
 - Iceberg schema evolution, `MERGE`, snapshots, and historical reads are verified. Compaction, snapshot expiration, and partition evolution are not part of the current demo unless explicitly required by the trainer rubric.
 - No controlled throughput, latency, or cost benchmark compares Delta and Iceberg.
 - GitHub Actions [run #7](https://github.com/Harshita-codes/Project-Nexus-Retail-Lakehouse/actions/runs/45143048325) passed on commit `fb06c33`; the batch-helper and streaming test suites also pass locally. CI does not start Kafka or execute a Kubernetes integration test.
-- The changed Databricks batch notebook has not yet been imported and executed in the Azure workspace; notebook-specific widget, `%run` helper import, and Delta write behavior still need that runtime check.
-- A controlled Kubernetes rollback, separate pod-deletion recovery exercise, Databricks Workflow run, and producer scaling/consumer-lag test remain unperformed.
+- The revised batch notebook has not yet been run as a parameterized Azure Databricks Job/Workflow with run history, counts, and duration evidence.
+- The trainer requires clear raw, curated, rejected, and analytics ADLS zones using `abfss` paths and an appropriate folder/partition layout. The current Unity Catalog volume and managed Delta tables are ADLS-backed, but the explicit zone mapping/layout has not been verified or evidenced.
+- There is no container image/Kubernetes Job for the batch Spark workload. The producer image is single-stage and the producer runs as a one-time Job; the trainer asks for multi-stage producer and batch images, a batch Job, and a producer Deployment.
+- Required Kubernetes demonstrations still missing: configuration change and rollback, diagnosis of a deliberately broken deployment, pod-failure recovery, producer replica scaling, and Kafka consumer-lag observation. A successful streaming rollout has been verified, but it does not cover these demonstrations.
 - The presentation outline and live-demo checklist are documented. A teammate is responsible for the slide deck, and the live demonstration has not yet been presented.
 
 ## Recommended future enhancements
