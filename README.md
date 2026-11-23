@@ -57,7 +57,7 @@ End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeli
 
 ## Automated Tests and CI
 
-The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. The batch helper tests check raw CSV schemas and rejection-reason generation. The streaming tests run Spark locally to check validation/quarantine rules, persisted watermark behavior, ten-minute revenue aggregation, Delta retry idempotency and schema evolution/time travel, and Iceberg replay idempotency and bootstrap. GitHub Actions is configured to run these suites, package both Scala projects, and build both Docker images on pushes and pull requests to `main`; the newest local changes have not yet been pushed through CI.
+The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. The batch helper tests check raw CSV schemas and rejection-reason generation. The streaming tests run Spark locally to check validation/quarantine rules, persisted watermark behavior, ten-minute revenue aggregation, Delta retry idempotency and schema evolution/time travel, and Iceberg replay idempotency and bootstrap. GitHub Actions runs these suites, packages both Scala projects, and builds both Docker images on pushes and pull requests to `main`. The latest pushed change, commit `fb06c33`, passed [CI run #7](https://github.com/Harshita-codes/Project-Nexus-Retail-Lakehouse/actions/runs/45143048325).
 
 Run the batch helper tests locally:
 

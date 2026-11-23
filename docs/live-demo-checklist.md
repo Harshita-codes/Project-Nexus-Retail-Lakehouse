@@ -61,16 +61,16 @@ Use the corresponding saved screenshots if the live verifier is slow or the clus
 
 Show the Kubernetes Deployment, pod, and PVC evidence. Explain that the rollout preserved the checkpoint/PVC and Kafka offsets; don't perform a rollout, rollback, or pod deletion during this short walkthrough.
 
-The latest published CI evidence is [GitHub Actions run #6](https://github.com/Harshita-codes/Project-Nexus-Retail-Lakehouse/actions/runs/45075261098) for earlier commit `8110d29`. The current local changes have passed focused tests and a Kubernetes rollout but have not yet been pushed for CI.
+The latest published CI evidence is [GitHub Actions run #7](https://github.com/Harshita-codes/Project-Nexus-Retail-Lakehouse/actions/runs/45143048325) for commit `fb06c33`.
 
 ### 5. Limitations and close
 
-State that Spark runs as a single local-mode pod on Docker Desktop hostpath storage; this is not a production or cloud-durability deployment. The managed volume is ADLS-backed, but a separate customer-managed external location is not configured. Iceberg compaction and snapshot expiration were not demonstrated. See [known-issues.md](known-issues.md).
+State that Spark runs as a single local-mode pod on Docker Desktop hostpath storage, as required by the trainer; this is not a production or cloud-durability deployment. The batch managed volume is ADLS-backed, but a separate customer-managed external location is not configured. Iceberg compaction and snapshot expiration were not demonstrated. See [known-issues.md](known-issues.md).
 
 ## Quick readiness checklist
 
 - [ ] Docker Desktop / Kubernetes is available, or screenshots are ready as fallback.
 - [ ] Namespace is `streaming`; the Deployment is Ready and the state PVC is Bound if demoing live.
 - [ ] Batch and streaming screenshots are open.
-- [ ] GitHub Actions run #6 is available.
+- [ ] GitHub Actions run #7 is available.
 - [ ] No producer rerun, PVC deletion, cluster reset, or unplanned deployment is part of the walkthrough.

@@ -30,4 +30,4 @@ The updated app was deployed and verified against the existing Kubernetes wareho
 
 ## Evidence captured and still to collect
 
-The repository screenshots capture the batch Delta governance results, Azure/ADLS backing, streaming schema and row counts, Iceberg history/time travel, Delta copies, and Kubernetes PVC status. The latest local change set has passed focused tests and a local Kubernetes rollout, but is not yet pushed or covered by a new CI run. A controlled same-workload performance benchmark and cross-engine test have not been run; do not make relative speed or cost claims without them.
+The repository screenshots capture the batch Delta governance results, Azure/ADLS backing, streaming schema and row counts, Iceberg history/time travel, Delta copies, and Kubernetes PVC status. Commit `fb06c33` passed focused tests, a local Kubernetes rollout, and [GitHub Actions run #7](https://github.com/Harshita-codes/Project-Nexus-Retail-Lakehouse/actions/runs/45143048325). A controlled same-workload performance benchmark and cross-engine test have not been run; do not make relative speed or cost claims without them.

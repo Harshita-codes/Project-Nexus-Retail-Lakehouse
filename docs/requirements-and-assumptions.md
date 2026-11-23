@@ -29,7 +29,7 @@ Demonstrate a retail lakehouse with historical batch processing and real-time or
 | Docker configuration and usage notes | The updated streaming image was rebuilt locally and deployed. README and [runbook.md](runbook.md) contain usage and recovery steps. |
 | Kubernetes manifests and runbook | Producer Job, Spark Deployment, Service/ConfigMap/PVC configuration, and [runbook.md](runbook.md) exist. |
 | Kubernetes deployment, rollout/rollback, and recovery evidence | The updated stream is Ready; all streaming PVCs remain Bound. The deployed pod uses the rebuilt image, retained the checkpoint and watermark file, and did not advance Kafka offsets. This successful rollout is verified; a deliberate rollback test is still outstanding. Procedures are in [runbook.md](runbook.md). |
-| Git repository and CI evidence | GitHub Actions run #6 passed on earlier commit `8110d29`. The current local changes pass targeted Scala tests, but have not been pushed and have no corresponding CI run yet. |
+| Git repository and CI evidence | GitHub Actions run #7 passed on commit `fb06c33`. The pushed changes also pass the targeted local Scala tests. |
 | README and final presentation/live demo | README and the walkthrough outline/checklist are documented. The finished slide deck is assigned to another team member; the live demo itself has not yet been presented. |
 | Known issues and future enhancements | Tracked in [known-issues.md](known-issues.md). |
 
@@ -38,6 +38,6 @@ Demonstrate a retail lakehouse with historical batch processing and real-time or
 1. The assigned teammate produces the final presentation slides; the live demo still needs to be delivered.
 2. Import and run the changed batch notebook in Azure Databricks. The new helper schemas, validation functions, widgets, and target namespace have local unit coverage where possible, but Databricks execution and job/run-history evidence have not been regenerated.
 3. If required by the rubric, capture a Databricks Workflow/Job run and direct raw/curated/rejected/analytics ADLS zoning evidence. The checked-in batch pipeline currently uses the verified Unity Catalog managed volume and Delta tables.
-4. Do not claim streaming ADLS persistence: the requested deployment remains on the local PVC. A move to cloud object storage requires a separate design and deployment.
+4. The trainer confirmed that streaming storage should remain on the local PVC, so this is the intended design and not a rubric gap. Preserve the PVC, checkpoint, and watermark state.
 5. Deliberate Kubernetes rollback/recovery evidence and producer scaling/consumer-lag evidence are not captured. Use the runbook procedures only when a planned demo permits the associated rollout.
-6. Confirm whether the trainer explicitly requires a customer-managed external ADLS location or Iceberg maintenance beyond the verified schema evolution, `MERGE`, snapshots, and historical read.
+6. Confirm whether the rubric explicitly requires a customer-managed external ADLS location or Iceberg maintenance beyond the verified schema evolution, `MERGE`, snapshots, and historical read.
