@@ -1,0 +1,10 @@
+.git
+**/target
+**/.bsp
+**/.metals
+Architecture
+Data Ingestion/Batch
+Data Ingestion/Streaming
+Development
+.github
+*.md

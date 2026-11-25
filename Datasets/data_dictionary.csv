@@ -1,0 +1,31 @@
+dataset,field,raw_type,description
+products,product_id,string,Product identifier
+products,product_name,string,Product display name
+products,category,string,Product category
+products,unit_price,string,Unit price parsed as a positive decimal
+products,active,string,Whether the product is active
+customers,customer_id,string,Customer identifier
+customers,customer_name,string,Customer display name
+customers,email,string,Customer email address
+customers,city,string,Customer city
+customers,signup_date,string,Customer signup date parsed as a date
+orders,order_id,string,Order identifier
+orders,customer_id,string,Customer foreign key
+orders,product_id,string,Product foreign key
+orders,quantity,string,Ordered quantity parsed as an integer
+orders,order_date,string,Order date parsed from supported date formats
+orders,order_status,string,Order lifecycle status
+orders,last_updated,string,Source update timestamp used for deduplication and merges
+orders_v2,sales_channel,string,Schema-evolution field for WEB MOBILE_APP or STORE
+orders_v2,discount_amount,string,Schema-evolution discount amount parsed as a decimal
+order_events,event_id,string,Unique event identifier
+order_events,order_id,string,Order identifier used as the Kafka message key
+order_events,customer_id,string,Customer identifier for enrichment
+order_events,product_id,string,Product identifier for enrichment
+order_events,quantity,number,Quantity associated with the order event
+order_events,unit_price,number,Unit price associated with the order event
+order_events,event_type,string,Order lifecycle event type
+order_events,event_time,string,Event timestamp used for event-time processing
+order_events,ingest_time,string,Timestamp when the event was produced or ingested
+order_events,sales_channel,string,Optional order sales channel
+order_events,discount_amount,number,Optional discount amount

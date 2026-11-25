@@ -1,350 +1,221 @@
-# Project Nexus — Retail Medallion Lakehouse (Batch & Real-Time Streaming)
+# Project Nexus
 
-End-to-end **Bronze → Silver → Quarantine → Gold** data engineering pipeline built in **Scala**, combining batch Lakehouse governance on **Azure Databricks (Delta Lake)** with low-latency event streaming on **Apache Kafka, Spark Structured Streaming, Delta Lake, and Apache Iceberg**.
+**Retail medallion lakehouse for historical sales and real-time order events**
 
+## Project overview
 
-## Architecture Overview
+Project Nexus combines Azure Databricks batch analytics with a local Kafka and Spark Structured Streaming demonstration. The pipelines validate product, customer, order, and event data into Bronze, Silver, Quarantine, and Gold outputs. Delta Lake is used for batch tables and streaming copies; Apache Iceberg demonstrates streaming snapshots, schema evolution, and time travel.
 
-### Part I: Batch Processing (Azure Databricks & Delta Lake)
-* **Catalog & Storage:** Unity Catalog (`nexus.retail_nexus`) backed by Volume `/Volumes/nexus/default/retail_nexus_volume/batch`.
-* **Bronze Layer:** Ingests raw `products.csv` (27), `customers.csv` (42), and `orders.csv` (161) with `_ingested_at` audit metadata.
-* **Silver & Quarantine Layers:** Enforces schema typing, regex/domain validation, window-based deduplication, and foreign-key referential integrity:
-  * **Products:** `21` valid (`silver_products`), `6` rejected (`quarantine_products`)
-  * **Customers:** `34` valid (`silver_customers`), `8` rejected (`quarantine_customers`)
-  * **Orders:** `88` valid (`silver_orders`), `73` rejected (`quarantine_orders`)
-* **Incremental Upserts (`MERGE INTO`):** Processes `orders_updates.csv` (17 raw → 7 quarantined, 10 valid → 6 updates + 4 inserts), bringing `silver_orders` to `94` rows.
-* **Schema Evolution:** Ingests `orders_v2.csv` (`mergeSchema = true`), dynamically adding `sales_channel` and `discount_amount` (12 raw → 2 quarantined, 10 valid), bringing `silver_orders` to `104` rows.
-* **Gold Analytics:** Builds `gold_category_sales` and `gold_customer_spend` (excluding `CANCELLED` orders).
-* **Governance:** Verified via `DESCRIBE HISTORY`, Delta Time Travel (`VERSION AS OF 0` = 88 rows vs. current = 104 rows), `OPTIMIZE ... ZORDER BY`, and `VACUUM`.
+The Databricks batch workflow is the primary historical pipeline. A separate local Spark batch app and Docker/Kubernetes manifests demonstrate processing the base CSV inputs without replacing the notebook's incremental `MERGE` or schema-evolution stages.
 
-Azure Databricks/ADLS remains the primary cloud batch implementation. A separate local Kubernetes batch app demonstrates the same base products, customers, and orders validation using Spark local mode and writes Delta outputs to a dedicated local PVC. It complements, not replaces, the Databricks workflow; the local demo does not perform the Databricks incremental `MERGE` or schema-evolution steps. Kubernetes input/output storage is local demonstration storage, not ADLS, unless external storage access is separately configured.
+Start with the [architecture](#architecture), [demo guide](docs/demo-guide.md), or [requirements and evidence matrix](docs/requirements-compliance.md).
 
-### Part II: Real-Time Streaming (Kafka, Spark Structured Streaming, Delta Lake & Iceberg)
-* **Ingestion:** The checked-in producer sample publishes 30 JSON events to Kafka topic `order-events`; the app writes them to Iceberg and is configured to mirror them into Delta.
-* **Stream Validation & Quarantine:** Filters invalid and duplicate events, non-positive quantities/prices, invalid event types, and orphan foreign keys (16 events in the verified Iceberg run); the updated app also writes quarantine records to Delta.
-* **Stateful Upserts, Late Arrivals & Schema Evolution:** Maintains Iceberg silver (12 orders in the verified local run), handling updates, cancellations, and the `sales_channel` and `discount_amount` fields; the updated app mirrors this state to Delta. A configurable 10-minute event-time watermark is persisted on the PVC; late events remain in Bronze and are quarantined instead of changing Silver.
-* **Gold Streaming Window & Snapshots:** Computes configurable 10-minute event-time category revenue (8 rows in the verified Iceberg run), records Iceberg snapshots, and mirrors the aggregate to Delta.
+## Technology stack
 
----
+| Area | Technology |
+|---|---|
+| Batch processing | Azure Databricks, Scala, Apache Spark, Unity Catalog |
+| Streaming | Apache Kafka and Spark Structured Streaming on local Kubernetes |
+| Storage and table formats | ADLS Gen2-backed Unity Catalog volume, local PVC, Delta Lake, Apache Iceberg |
+| Deployment | Docker, Kubernetes Jobs and Deployments, ConfigMaps and PVCs |
+| Analytics and verification | Databricks SQL, Spark SQL, sbt tests, GitHub Actions |
 
-## Repository Structure
+## Repository contents
 
-```text
-├── part1-batch-databricks/
-│   ├── 00_batch_helpers.scala
-│   ├── 01_bronze_ingestion.scala
-│   ├── build.sbt
-│   ├── Dockerfile
-│   ├── k8s/
-│   ├── src/
-│   ├── test-harness/
-│   └── screenshots/
-├── part2-streaming-iceberg/
-│   ├── build.sbt
-│   ├── ProjectNexusStreamingApp.scala
-│   ├── VerifyProjectNexusIceberg.scala
-│   ├── src/test/
-│   └── screenshots/
-├── producer/
-│   ├── build.sbt
-│   ├── src/
-│   └── data/events/
-├── .github/workflows/ci.yml
-├── docs/
-│   ├── requirements-and-assumptions.md
-│   ├── solution-design.md
-│   ├── delta-vs-iceberg.md
-│   ├── runbook.md
-│   ├── known-issues.md
-│   ├── final-presentation-outline.md
-│   └── live-demo-checklist.md
-└── README.md
+| Section | What to open |
+|---|---|
+| [Architecture](Architecture/README.md) | Batch/streaming diagrams and cloud/local boundaries |
+| [Datasets](Datasets/README.md) | Retail input layout, sample event fixture, and data dictionary |
+| [Data Ingestion](Data%20Ingestion/README.md) | Databricks notebook, Spark apps, and Kafka producer |
+| [Dashboard](Dashboard/README.md) | Gold tables and business SQL queries |
+| [Development](Development/README.md) | Dockerfiles, Kubernetes manifests, and build contexts |
+| [Logging](Logging/README.md) | Runtime-log locations and evidence status |
+| [Testing](Testing/README.md) | Test suites, screenshot evidence, and validation command |
+| [Project documentation](docs/requirements-compliance.md) | Requirements status and outstanding evidence |
+
+## Architecture
+
+```mermaid
+flowchart LR
+  CSV["Retail CSV inputs"] --> VOL["Unity Catalog volume · ADLS Gen2"]
+  VOL --> DB["Azure Databricks · Scala/Spark"]
+  DB --> BR["Bronze · Delta"]
+  BR --> SIL["Silver · validated Delta"]
+  BR --> Q["Quarantine · rejected rows"]
+  SIL --> GOLD["Gold · category sales and customer spend"]
+  SIL --> MERGE["Incremental MERGE and schema evolution"]
+
+  FIXTURE["30-event JSONL fixture"] --> PROD["Kafka producer"]
+  PROD --> KAFKA["Kafka · order-events"]
+  KAFKA --> STREAM["Spark Structured Streaming"]
+  STREAM --> ICE["Iceberg outputs"]
+  STREAM --> DLT["Delta mirror"]
+  STREAM --> PVC["Local PVC · checkpoint and watermark"]
 ```
 
-## Automated Tests and CI
+The streaming PVC is local Docker Desktop storage, not ADLS. See [Architecture/README.md](Architecture/README.md) for the separate batch, local batch, and streaming flows.
 
-The producer tests run without Kafka and check deterministic JSONL file ordering, blank-line handling, rejection of events without a valid `order_id`, and readability of the checked-in sample events. Batch helper tests check raw CSV schemas and rejection reasons; the batch-app tests exercise local Spark validation and Delta outputs. Streaming tests check validation/quarantine rules, persisted watermark behavior, ten-minute revenue aggregation, Delta retry idempotency and schema evolution/time travel, and Iceberg replay idempotency and bootstrap. GitHub Actions runs these suites, builds the producer and batch images, validates Kubernetes manifests, and packages the streaming app on pushes and pull requests to `main`. See the [CI workflow](.github/workflows/ci.yml) and its latest run on the repository's Actions page.
+## Dataset
 
-Run the Databricks helper tests:
+| Input | Baseline rows | Repository status |
+|---|---:|---|
+| Products | 27 | Source CSV not checked in |
+| Customers | 42 | Source CSV not checked in |
+| Orders | 161 | Source CSV not checked in |
+| Kafka order-event fixture | 30 | Included under `Datasets/streaming/order-events/` |
+
+The Databricks notebook also uses separate incremental-update and schema-evolution CSVs. The authorized source CSVs must be available in the configured Unity Catalog volume (or staged separately for the local batch demo); this repository does not fabricate replacement inputs.
+
+## Medallion architecture and analytics
+
+| Layer | Project output |
+|---|---|
+| Bronze | Raw batch entities and streaming order events with ingestion metadata |
+| Silver | Typed, deduplicated and enriched products, customers, and orders |
+| Quarantine | Rejected batch rows and invalid, duplicate, or late streaming events |
+| Gold | `gold_category_sales`, `gold_customer_spend`, and the streaming revenue-window aggregate |
+
+The batch Gold tables exclude cancelled orders. Category sales are grouped by category and sales channel; customer spend is grouped by customer. See the [query catalogue](Dashboard/README.md) and [SQL examples](Dashboard/business-queries.sql).
+
+## Run the project
+
+Unless a command changes directory, run it from the repository root. See the [demo guide](docs/demo-guide.md) for complete procedures and safeguards.
+
+## Run the batch notebook
+
+1. Import [01_bronze_ingestion.scala](<Data Ingestion/Batch/01_bronze_ingestion.scala>) and [00_batch_helpers.scala](<Data Ingestion/Batch/00_batch_helpers.scala>) into the same Databricks workspace folder; the notebook uses `%run ./00_batch_helpers`.
+2. Set `batch_input_path` to `/Volumes/nexus/default/retail_nexus_volume/batch`, `target_catalog` to `nexus`, `target_schema` to a writable validation schema, and `run_date` to `yyyy-MM-dd`.
+3. Run the notebook and review the Bronze counts, Silver and Quarantine outputs, Gold tables, and Delta history.
+
+For trainer Job/Workflow evidence, create a parameterized notebook Job and save its run status, duration, parameters, counts, schema, and table locations. The revised Job run has not yet been captured.
+
+## Run the portable batch job
+
+Stage the three authorized base CSV files as `products.csv`, `customers.csv`, and `orders.csv` under `Data Ingestion\Batch\batch-input`. Then build the image using the module as the context:
 
 ```powershell
-cd part1-batch-databricks\test-harness
-sbt test
+Push-Location '.\Data Ingestion\Batch'
+docker build -t nexus-batch:1.0 -f ..\..\Development\Docker\nexus-batch.Dockerfile .
+Pop-Location
 ```
 
-The batch app is tested in the Docker build's Linux stage and in CI. On Windows, Hadoop's local filesystem tests require `winutils.exe`; use the Docker build to run the batch integration tests without installing it locally:
+Run the one-shot Kubernetes Job only after staging the real inputs. The prepared Job writes to its own output PVC and does not use or change the streaming PVC, checkpoint, or Kafka topic:
 
 ```powershell
-cd part1-batch-databricks
-docker build -t nexus-batch:1.0 .
-```
-
-### Local Kubernetes batch demo
-
-The app accepts flat `products.csv`, `customers.csv`, and `orders.csv` files, or the corresponding nested files under `raw/products`, `raw/customers`, and `raw/orders`. It writes Delta `bronze/`, `silver/`, `quarantine/`, and `gold/` directories under the configured output path and prints row counts and elapsed time. The Databricks notebook remains unchanged.
-
-For a local container run, place the three CSVs in `part1-batch-databricks\batch-input` and run:
-
-```powershell
-cd part1-batch-databricks
-New-Item -ItemType Directory -Force .\batch-output | Out-Null
-docker run --rm `
-  -e BATCH_INPUT_PATH=/data/batch `
-  -e BATCH_OUTPUT_PATH=/lakehouse/batch `
-  -e BATCH_RUN_DATE=2026-11-23 `
-  -e BATCH_OUTPUT_FORMAT=delta `
-  -v "${PWD}\batch-input:/data/batch:ro" `
-  -v "${PWD}\batch-output:/lakehouse/batch" `
-  nexus-batch:1.0
-```
-
-For Kubernetes, first copy the CSVs from the approved batch source into `batch-input`. ConfigMaps are limited to 1 MiB; use a separate input PVC instead if the files exceed that limit. Then create/update the input ConfigMap and apply the batch PVC, config, and Job:
-
-```powershell
+Push-Location '.\Data Ingestion\Batch'
 kubectl create configmap nexus-batch-data -n streaming `
   --from-file=products.csv=.\batch-input\products.csv `
   --from-file=customers.csv=.\batch-input\customers.csv `
   --from-file=orders.csv=.\batch-input\orders.csv `
   --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -f .\k8s\batch-pvc.yaml
-kubectl apply -f .\k8s\batch-config.yaml
+Pop-Location
+kubectl apply -f .\Development\Kubernetes\batch-pvc.yaml
+kubectl apply -f .\Development\Kubernetes\batch-config.yaml
 kubectl delete job nexus-batch -n streaming --ignore-not-found
-kubectl apply -f .\k8s\batch-job.yaml
+kubectl apply -f .\Development\Kubernetes\batch-job.yaml
 kubectl wait --for=condition=complete job/nexus-batch -n streaming --timeout=10m
 kubectl get jobs,pods,pvc -n streaming
-kubectl get pod -n streaming -l job-name=nexus-batch -o yaml
 kubectl logs -n streaming job/nexus-batch
 ```
 
-The output uses a new `nexus-batch-output` PVC and does not touch the streaming PVC, Kafka topic, or checkpoint. Do not apply a CronJob until the one-shot Job has completed successfully.
+Do not add a CronJob until the one-shot Job succeeds. See the [requirements matrix](docs/requirements-compliance.md) for current evidence status.
 
-Run the producer tests locally:
+## Run the Kafka event producer
+
+The five JSONL files contain 30 sample events. Producer tests run without Kafka. From the repository root:
 
 ```powershell
-cd producer
+Push-Location '.\Data Ingestion\Producer'
 sbt test
+sbt run --once
+Pop-Location
 ```
 
-Run the streaming tests separately:
+To build the producer container, use the repository root as the build context so the event fixture is included:
 
 ```powershell
-cd part2-streaming-iceberg
+docker build -t nexus-kafka-producer:1.0 -f .\Development\Docker\nexus-producer.Dockerfile .
+```
+
+The existing production-topic sample has already been processed. Do not rerun the producer against `order-events` when preserving the verified offsets and streaming output.
+
+## Run real-time streaming locally
+
+The streaming app uses the existing Kafka Service, reference-data ConfigMap, persistent streaming PVC, checkpoint, and watermark. Build the application image from its module directory, then apply the centralized Kubernetes files:
+
+```powershell
+Push-Location '.\Data Ingestion\Streaming'
 sbt test
-```
-
-The workflow is defined in `.github/workflows/ci.yml`. The workflow does not start Kafka or run a Kubernetes integration test.
-
-The implementation-based comparison, limitations, and remaining evidence to capture are documented in [docs/delta-vs-iceberg.md](docs/delta-vs-iceberg.md).
-The live walkthrough sequence and safe preflight steps are in [docs/live-demo-checklist.md](docs/live-demo-checklist.md).
-
-## Kafka Event Producer
-
-The `producer/` module publishes JSON order events to the `order-events` Kafka topic.
-
-### Local prerequisites
-
-- Java 17
-- sbt
-- A Kafka broker reachable at `localhost:9092`
-- Docker optional for the containerized producer
-
-### Run locally
-
-```bash
-cd producer
-sbt run --once
-```
-
-Configuration is environment-based:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka broker address |
-| `KAFKA_TOPIC` | `order-events` | Destination topic |
-| `PRODUCER_INTERVAL_MS` | `500` | Delay between events |
-| `EVENT_FILE_PATH` | `data/events` or `/app/data/events` | JSONL file or directory |
-
-Examples:
-
-```bash
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
-KAFKA_TOPIC=order-events \
-PRODUCER_INTERVAL_MS=100 \
-sbt run --once
-
-sbt run --continuous
-```
-
-The `--once` argument publishes every event once. `--continuous` publishes the event set repeatedly until stopped.
-
-### Run the producer as a Kubernetes Job
-
-The repository includes a one-pass Job manifest for the existing Docker Desktop cluster. It expects Kafka to be reachable at `kafka:9092` in namespace `streaming`, as in the current local cluster setup.
-
-```powershell
-cd producer
-docker build -t nexus-kafka-producer:1.0 .
-kubectl create namespace streaming --dry-run=client -o yaml | kubectl apply -f -
-kubectl exec -n streaming deployment/kafka -- /opt/kafka/bin/kafka-topics.sh `
-  --bootstrap-server kafka:9092 --create --if-not-exists `
-  --topic order-events --partitions 3 --replication-factor 1
-kubectl apply -f k8s/producer-job.yaml
-kubectl wait -n streaming --for=condition=complete job/nexus-order-event-producer --timeout=180s
-kubectl logs -n streaming job/nexus-order-event-producer
-```
-
-The Job sends each sample record once and exits. Remove the completed Job before rerunning it:
-
-```powershell
-kubectl delete job nexus-order-event-producer -n streaming
-```
-
-### Producer scaling demo
-
-The separate producer Deployment starts with zero replicas and publishes only to `order-events-scaling-demo`; it does not feed the existing streaming pipeline or alter its `order-events` offsets. Build the image first, create the isolated topic, then scale the Deployment only for the demo:
-
-```powershell
-cd producer
-docker build -t nexus-kafka-producer:1.0 .
-kubectl exec -n streaming deployment/kafka -- /opt/kafka/bin/kafka-topics.sh `
-  --bootstrap-server kafka:9092 --create --if-not-exists `
-  --topic order-events-scaling-demo --partitions 3 --replication-factor 1
-kubectl apply -f k8s/producer-deployment.yaml
-kubectl scale deployment/nexus-order-event-producer-demo -n streaming --replicas=1
-kubectl get pods -n streaming -l app=nexus-order-event-producer-demo
-kubectl scale deployment/nexus-order-event-producer-demo -n streaming --replicas=3
-kubectl get pods -n streaming -l app=nexus-order-event-producer-demo
-kubectl scale deployment/nexus-order-event-producer-demo -n streaming --replicas=0
-```
-
-Each replica replays the sample set continuously, so duplicate sample events are expected in this demo topic. Scale back to zero when evidence is captured. Do not change the Deployment's topic to `order-events` or rerun the existing one-time Job when preserving current streaming output.
-
-### Sample event files
-
-The files under `producer/data/events/` include:
-
-- Valid created, updated and cancelled events
-- Duplicate event IDs
-- Invalid quantities and prices
-- Invalid event types
-- Orphan customer and product IDs
-- Negative discounts and invalid sales channels
-- Late or future-skewed events
-- Schema-evolution fields
-
-### Container build
-
-Run Docker from the `producer/` directory:
-
-```bash
-cd producer
-docker build -t nexus-kafka-producer:1.0 .
-docker run --rm \
-  -e KAFKA_BOOTSTRAP_SERVERS=host.docker.internal:9092 \
-  -e KAFKA_TOPIC=order-events \
-  -e EVENT_FILE_PATH=/app/data/events \
-  nexus-kafka-producer:1.0
-```
-
-### Kafka verification
-
-```bash
-kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic order-events \
-  --from-beginning
-```
-
-### Run Spark streaming on local Kubernetes
-
-The local Kubernetes deployment runs Spark 3.5.9 in a single pod using local mode. It connects to the Kafka Service `kafka:9092`, mounts the reference CSV files from `nexus-reference-data`, and stores Delta tables, Iceberg tables, and streaming checkpoints on the `nexus-stream-state` PVC.
-
-The local example uses the Docker Desktop `hostpath` storage class. This is suitable for a local demonstration, not a cloud durability guarantee. Do not delete the PVC before saving the table and checkpoint evidence. The local Kafka broker has PLAINTEXT authentication disabled, so this demo has no Kafka credentials to store in a Secret.
-
-The streaming app writes Bronze, Silver, Quarantine, and Gold outputs to both Iceberg and Delta. Delta paths default to `/lakehouse/delta/retail_nexus` and can be changed with `DELTA_WAREHOUSE`. If those Delta paths do not exist on startup, the app seeds them from the current Iceberg tables, so an existing Kafka checkpoint can be kept and the producer does not need to be rerun. Delta Bronze and Quarantine appends use batch transaction IDs for retry idempotency; Delta Silver and Gold are refreshed from the current Iceberg state. Those full-state refreshes are intended for this small demo, not high-volume production.
-
-First, make sure the reference-data ConfigMap exists. The following PowerShell command creates or updates it from the local sample files:
-
-```powershell
-kubectl create configmap nexus-reference-data -n streaming `
-  --from-file=products.csv="C:\kafkastreamingicebergdemo\nexus-data\products.csv" `
-  --from-file=customers.csv="C:\kafkastreamingicebergdemo\nexus-data\customers.csv" `
-  --dry-run=client -o yaml | kubectl apply -f -
-```
-
-Build the Scala app and Docker image, then apply the PVC and configuration before the Deployment:
-
-```powershell
-cd part2-streaming-iceberg
-sbt clean
 sbt package
 Copy-Item .\target\out\jvm\scala-2.12.18\kafkastreamingicebergdemo\kafkastreamingicebergdemo_2.12-0.1.0-SNAPSHOT.jar .\target\app.jar -Force
-docker build -t nexus-streaming:1.0 .
-kubectl apply -f .\k8s\streaming-state-pvc.yaml
-kubectl apply -f .\k8s\streaming-config.yaml
-kubectl wait -n streaming --for=jsonpath='{.status.phase}'=Bound pvc/nexus-stream-state --timeout=120s
-kubectl apply -f .\k8s\streaming-deployment.yaml
+docker build -t nexus-streaming:1.0 -f ..\..\Development\Docker\nexus-streaming.Dockerfile .
+Pop-Location
+kubectl apply -f .\Development\Kubernetes\streaming-state-pvc.yaml
+kubectl apply -f .\Development\Kubernetes\streaming-config.yaml
+kubectl apply -f .\Development\Kubernetes\streaming-deployment.yaml
 kubectl rollout status deployment/nexus-streaming -n streaming --timeout=8m
-```
-
-For an existing Deployment, if you rebuilt the same `nexus-streaming:1.0` image tag, applying the manifest does not trigger a rollout. Restart it to use the rebuilt local image and updated ConfigMap values:
-
-```powershell
-kubectl rollout restart deployment/nexus-streaming -n streaming
-kubectl rollout status deployment/nexus-streaming -n streaming --timeout=8m
-```
-
-The image uses Java 17 and the Spark 3.5.9 distribution. The pod resolves the Spark Kafka connector, Iceberg runtime, and Delta Lake 3.3.2 runtime through Maven Central at startup; it therefore needs internet access on first launch. Spark's Ivy cache is stored at `/lakehouse/ivy2` on the persistent volume, so dependencies remain available after pod restarts. If the Delta paths do not exist yet, the app initializes them from the current Iceberg tables before consuming further Kafka events. Kubernetes probes check that the Spark process is alive and that its streaming query has started. Resource requests and limits are defined in the Deployment manifest.
-
-Check the pod and follow the processing logs:
-
-```powershell
 kubectl get deployments,pods,pvc -n streaming
 kubectl logs -n streaming deployment/nexus-streaming --tail=100
-kubectl logs -n streaming deployment/nexus-streaming -f
 ```
 
-For the checked-in 30-event producer sample, the expected counts in both formats after processing are 30 bronze events, 12 silver orders, 16 quarantined events, and 8 gold windows. Query the Iceberg tables from the running pod:
+The Kafka broker and reference-data ConfigMap are prerequisites provided by the existing local environment. Preserve the PVC and checkpoint during recovery; never reset the cluster or rerun the production-topic producer just to demonstrate recovery. The [live demo checklist](docs/live-demo-checklist.md) has safe walkthrough steps.
+
+### Verify the running stream
+
+The verifier is read-only. Run it against the deployed application to inspect table counts, schema, and Iceberg history:
 
 ```powershell
-kubectl exec -n streaming deployment/nexus-streaming -- /opt/spark/bin/spark-sql --master 'local[1]' --driver-memory 512m --conf spark.jars.ivy=/lakehouse/ivy2 --conf spark.sql.catalogImplementation=in-memory --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.catalog.local=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.local.type=hadoop --conf spark.sql.catalog.local.warehouse=file:///lakehouse/warehouse --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.12.0 -e "SELECT 'bronze' AS dataset, count(*) AS rows FROM local.retail_nexus.bronze_order_events UNION ALL SELECT 'silver', count(*) FROM local.retail_nexus.silver_order_events UNION ALL SELECT 'quarantine', count(*) FROM local.retail_nexus.quarantine_order_events UNION ALL SELECT 'gold_windows', count(*) FROM local.retail_nexus.gold_streaming_sales_window UNION ALL SELECT 'silver_snapshots', count(*) FROM local.retail_nexus.silver_order_events.snapshots"
+kubectl exec -n streaming deployment/nexus-streaming -- env `
+  ICEBERG_WAREHOUSE=file:///lakehouse/warehouse `
+  DELTA_WAREHOUSE=file:///lakehouse/delta/retail_nexus `
+  SPARK_MASTER=local[1] `
+  /opt/spark/bin/spark-submit --master "local[1]" --driver-memory 512m `
+  --conf spark.jars.ivy=/lakehouse/ivy2 `
+  --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,io.delta.sql.DeltaSparkSessionExtension `
+  --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog `
+  --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.12.0,io.delta:delta-spark_2.12:3.3.2 `
+  --class com.demo.VerifyProjectNexusIceberg /opt/project-nexus/app.jar
 ```
 
-Run the Iceberg verifier to capture the evolved schema, row samples, snapshot history, and row count at the earliest silver snapshot:
+## Run the Kubernetes replay
+
+The producer Job replays the checked-in 30-event fixture to `order-events`. That fixture has already been processed in the verified environment, so do not rerun this Job against the existing topic when preserving its offsets and table counts. The Job and isolated scaling Deployment are under [Development/Kubernetes](Development/README.md).
+
+The separate producer scaling Deployment is configured for `order-events-scaling-demo` and does not feed the streaming consumer. Follow the [demo guide](docs/demo-guide.md) for a controlled replay or scaling demonstration; do not point that Deployment at `order-events`.
+
+## Run the continuous consumer on Kubernetes
+
+The `nexus-streaming` Deployment continuously polls Kafka with a five-second Spark processing-time trigger. Its PVC stores the checkpoint, Iceberg and Delta data, and the 10-minute event-time watermark. A trigger interval schedules micro-batches; it is not an end-to-end latency guarantee. Preserve the PVC when replacing a pod so the consumer resumes from its checkpoint.
+
+## Assumptions and limits
+
+- The original retail CSVs are external inputs and are not present in this checkout.
+- Databricks batch storage is ADLS Gen2-backed. The local streaming warehouse, checkpoint, and watermark are on a Kubernetes PVC.
+- Streaming uses a plaintext local Kafka example. Do not commit credentials; authenticated deployments should use Kubernetes Secrets or an approved secret store.
+- The repository has no dbt project, standalone BI dashboard, or centralized log-storage service. Transformations are Scala/Spark; query Gold tables in Databricks SQL; read current Kubernetes output using `kubectl logs`.
+- Explicit ADLS `abfss` raw/curated/rejected/analytics zone verification and a revised parameterized Databricks Job run are still outstanding.
+
+## Delta Lake and Iceberg
+
+Delta Lake provides the Databricks batch tables and streaming copies; Iceberg demonstrates streaming table snapshots, schema evolution, and historical reads. The comparison and scope notes are in [delta-vs-iceberg.md](docs/delta-vs-iceberg.md).
+
+## Validate locally
+
+Run the Scala test suites (the validation script reports the Windows `winutils.exe` limitation where applicable):
 
 ```powershell
-kubectl exec -n streaming deployment/nexus-streaming -- env ICEBERG_WAREHOUSE=file:///lakehouse/warehouse DELTA_WAREHOUSE=file:///lakehouse/delta/retail_nexus SPARK_MASTER=local[1] /opt/spark/bin/spark-submit --master "local[1]" --driver-memory 512m --conf spark.jars.ivy=/lakehouse/ivy2 --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,io.delta.sql.DeltaSparkSessionExtension --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.12.0,io.delta:delta-spark_2.12:3.3.2 --class com.demo.VerifyProjectNexusIceberg /opt/project-nexus/app.jar
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Testing\validate-project.ps1
 ```
 
-Capture the output of the count query, the Deployment/pod status, and the processing logs as evidence. The first run reads the existing `order-events` topic from the earliest offsets; do not rerun the producer unless you intend to add another test batch.
+Batch Spark integration tests run in the Linux Docker build stage and GitHub Actions. Local Windows execution may require Hadoop `winutils.exe`; see [Testing](Testing/README.md).
 
-To demonstrate checkpoint recovery after capturing the initial results, delete the streaming pod and wait for its Deployment to replace it:
+## Hosted CI
 
-```powershell
-kubectl delete pod -n streaming -l app=nexus-streaming
-kubectl rollout status deployment/nexus-streaming -n streaming --timeout=8m
-kubectl get pods,pvc -n streaming
-kubectl logs -n streaming deployment/nexus-streaming --tail=100
-```
+The [CI workflow](.github/workflows/ci.yml) tests the batch helpers, batch app, streaming app, and producer; builds the workload images; and validates Kubernetes manifests. The last recorded successful workflow before this local repository-layout update is [run #14](https://github.com/Harshita-codes/Project-Nexus-Retail-Lakehouse/actions/runs/45190052284). This layout update has not yet been pushed, so it has not been validated by a new hosted run.
 
-The PVC must remain bound: it contains the Spark checkpoint and both table-format warehouses. After recovery, rerun the count query and compare the results with the captured pre-restart counts.
+## Recorded outcomes
 
-To demonstrate a temporary runtime configuration change, rollout, and rollback, override the shuffle partition count in the Deployment, verify it in the new pod, then roll back to the manifest-backed ConfigMap value:
-
-```powershell
-kubectl rollout history deployment/nexus-streaming -n streaming
-kubectl set env deployment/nexus-streaming -n streaming SPARK_SHUFFLE_PARTITIONS=2
-kubectl rollout status deployment/nexus-streaming -n streaming --timeout=8m
-kubectl exec -n streaming deployment/nexus-streaming -- printenv SPARK_SHUFFLE_PARTITIONS
-kubectl rollout history deployment/nexus-streaming -n streaming
-kubectl rollout undo deployment/nexus-streaming -n streaming
-kubectl rollout status deployment/nexus-streaming -n streaming --timeout=8m
-kubectl apply -f part2-streaming-iceberg\k8s\streaming-deployment.yaml
-kubectl exec -n streaming deployment/nexus-streaming -- printenv SPARK_SHUFFLE_PARTITIONS
-```
-
-The first printed value should be `2`; after rollback it should be `4`, inherited from `nexus-streaming-config`. Capture both values and the rollout history/status as evidence. The local broker uses no authentication, so no credentials are needed in this deployment. If authentication is added later, store credentials in a Kubernetes Secret and reference it through the pod environment or a mounted file; never commit secret values to Git.
-
-## Known Issues and Future Enhancements
-
-See [docs/known-issues.md](docs/known-issues.md) for environment limitations, storage consistency notes, and recommended enhancements. The remaining evidence checklist is in [docs/requirements-and-assumptions.md](docs/requirements-and-assumptions.md), and the [final presentation outline](docs/final-presentation-outline.md) lists the demonstration order.
+- Baseline batch evidence: Bronze 27 products, 42 customers, and 161 orders; final Silver orders 104. Screenshots are in [Testing/evidence/batch](Testing/evidence/batch/).
+- Streaming verification: Bronze/Silver/Quarantine/Gold counts of 30/12/16/8 in both Delta and Iceberg; production Kafka offsets remained `0:8`, `1:13`, and `2:9`. Screenshots are in [Testing/evidence/streaming](Testing/evidence/streaming/).
+- Local Kubernetes operational checks were run and verified. Separate terminal log files for those checks are not archived in this repository; see [Logging](Logging/README.md).
+- The team presentation/live demo and the remaining Databricks and real-input batch evidence are tracked in [requirements-compliance.md](docs/requirements-compliance.md).

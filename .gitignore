@@ -3,5 +3,5 @@
 .metals/
 **/target/
 **/project/target/
-/part1-batch-databricks/batch-input/
-/part1-batch-databricks/batch-output/
+/Data Ingestion/Batch/batch-input/
+/Data Ingestion/Batch/batch-output/

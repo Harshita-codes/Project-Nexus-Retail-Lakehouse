@@ -14,7 +14,7 @@ This guide is for the project walkthrough; it does not replace the teammate-owne
 
 - The expected context is `docker-desktop`; the streaming Deployment should be Ready and `nexus-stream-state` should remain Bound.
 - Do not rerun the Kafka producer, delete PVCs, or reset the Kubernetes cluster for this walkthrough. The producer's 30 events have already been processed and verified.
-- Keep the [redacted evidence screenshots](../part1-batch-databricks/screenshots/) and [streaming screenshots](../part2-streaming-iceberg/screenshots/) open as a fallback.
+- Keep the [batch evidence screenshots](<../Testing/evidence/batch/screenshots/>) and [streaming screenshots](<../Testing/evidence/streaming/screenshots/>) open as a fallback.
 
 If the cluster is stopped or resources are unavailable, don't try an unplanned redeployment during the presentation. Explain that the streaming environment is a local Docker Desktop demo and present the saved evidence instead.
 
@@ -28,7 +28,7 @@ Be explicit about the boundary: the batch Unity Catalog managed volume and Delta
 
 ### 2. Batch results
 
-Show `part1-batch-databricks/screenshots/16_adls_gen2_storage_and_batch_counts.png`. Point out the verified Bronze counts (27 products, 42 customers, 161 orders), 104 Silver orders, Delta format, and the redacted ADLS Gen2 confirmation.
+Show `Testing/evidence/batch/screenshots/16_adls_gen2_storage_and_batch_counts.png`. Point out the verified Bronze counts (27 products, 42 customers, 161 orders), 104 Silver orders, Delta format, and the redacted ADLS Gen2 confirmation.
 
 ### 3. Streaming results
 
@@ -39,7 +39,7 @@ kubectl get deployments,pods,pvc -n streaming
 kubectl logs -n streaming deployment/nexus-streaming --tail=40
 ```
 
-For table counts, schema evolution, samples, snapshot history, historical reads, and Delta copies, run the read-only verifier command in the root [README](../README.md) under “Run the Iceberg verifier.” Its expected counts for both formats are 30 Bronze, 12 Silver, 16 Quarantine, and 8 Gold.
+For table counts, schema evolution, samples, snapshot history, historical reads, and Delta copies, run the read-only verifier command in the root [README](../README.md#verify-the-running-stream). Its expected counts for both formats are 30 Bronze, 12 Silver, 16 Quarantine, and 8 Gold.
 
 The deployed app also persists its 10-minute event-time watermark on the PVC. To show that the state file exists without changing it:
 
@@ -61,7 +61,7 @@ Use the corresponding saved screenshots if the live verifier is slow or the clus
 
 Show the Kubernetes Deployment, pod, and PVC evidence. Explain that the rollout preserved the checkpoint/PVC and Kafka offsets; don't perform a rollout, rollback, or pod deletion during this short walkthrough.
 
-The latest published CI evidence is [GitHub Actions run #12](https://github.com/Harshita-codes/Project-Nexus-Retail-Lakehouse/actions/runs/45187669691) for commit `3d593ec`.
+The latest recorded successful CI evidence before the current local layout update is [GitHub Actions run #14](https://github.com/Harshita-codes/Project-Nexus-Retail-Lakehouse/actions/runs/45190052284). A new hosted run is needed after these changes are pushed.
 
 ### 5. Limitations and close
 
@@ -72,5 +72,5 @@ State that Spark runs as a single local-mode pod on Docker Desktop hostpath stor
 - [ ] Docker Desktop / Kubernetes is available, or screenshots are ready as fallback.
 - [ ] Namespace is `streaming`; the Deployment is Ready and the state PVC is Bound if demoing live.
 - [ ] Batch and streaming screenshots are open.
-- [ ] GitHub Actions run #12 is available.
+- [ ] GitHub Actions run #14 is available; trigger a new run after pushing the layout changes.
 - [ ] No producer rerun, PVC deletion, cluster reset, or unplanned deployment is part of the walkthrough.

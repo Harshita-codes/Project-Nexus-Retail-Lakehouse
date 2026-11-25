@@ -28,46 +28,45 @@ jobs:
         uses: sbt/setup-sbt@v1
 
       - name: Test batch validation helpers
-        working-directory: part1-batch-databricks/test-harness
+        working-directory: Data Ingestion/Batch/test-harness
         run: sbt test
 
       - name: Test batch Spark application
-        working-directory: part1-batch-databricks
+        working-directory: Data Ingestion/Batch
         run: sbt test
 
       - name: Build batch Spark image
-        working-directory: part1-batch-databricks
-        run: docker build -t nexus-batch:ci .
+        working-directory: Data Ingestion/Batch
+        run: docker build -t nexus-batch:ci -f ../../Development/Docker/nexus-batch.Dockerfile .
 
       - name: Validate batch Kubernetes manifests
         uses: docker://ghcr.io/yannh/kubeconform:v0.6.7
         with:
-          args: -strict -summary part1-batch-databricks/k8s/
+          args: -strict -summary Development/Kubernetes/
 
       - name: Test streaming transformations
-        working-directory: part2-streaming-iceberg
+        working-directory: Data Ingestion/Streaming
         run: sbt test
 
       - name: Test producer
-        working-directory: producer
+        working-directory: Data Ingestion/Producer
         run: sbt test
 
       - name: Build producer image
-        working-directory: producer
-        run: docker build -t nexus-kafka-producer:ci .
+        run: docker build -t nexus-kafka-producer:ci -f Development/Docker/nexus-producer.Dockerfile .
 
       - name: Compile streaming application
-        working-directory: part2-streaming-iceberg
+        working-directory: Data Ingestion/Streaming
         run: sbt compile
 
       - name: Package streaming application
-        working-directory: part2-streaming-iceberg
+        working-directory: Data Ingestion/Streaming
         run: sbt package
 
       - name: Stage streaming JAR for Docker
-        working-directory: part2-streaming-iceberg
+        working-directory: Data Ingestion/Streaming
         run: cp target/out/jvm/scala-2.12.18/kafkastreamingicebergdemo/kafkastreamingicebergdemo_2.12-0.1.0-SNAPSHOT.jar target/app.jar
 
       - name: Build streaming image
-        working-directory: part2-streaming-iceberg
-        run: docker build -t nexus-streaming:ci .
+        working-directory: Data Ingestion/Streaming
+        run: docker build -t nexus-streaming:ci -f ../../Development/Docker/nexus-streaming.Dockerfile .
